@@ -1,0 +1,281 @@
+use crate::error::{Error, Result};
+use std::io::{Read, Seek, SeekFrom};
+use windows::core::PCSTR;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileA, ReadFile, SetFilePointerEx, FILE_ATTRIBUTE_NORMAL, FILE_BEGIN, FILE_CURRENT,
+    FILE_END, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+};
+use windows::Win32::System::Ioctl::IOCTL_DISK_GET_DRIVE_GEOMETRY_EX;
+use windows::Win32::System::IO::DeviceIoControl;
+
+const APFS_BLOCK_SIZE: usize = 4096;
+
+pub struct DiskReader {
+    handle: HANDLE,
+    size: u64,
+    offset: u64,
+}
+
+impl DiskReader {
+    pub fn open(path: &str) -> Result<Self> {
+        Self::open_with_offset(path, 0)
+    }
+
+    pub fn open_with_offset(path: &str, offset: u64) -> Result<Self> {
+        let path_cstr = format!("{}\0", path);
+
+        unsafe {
+            let handle = CreateFileA(
+                PCSTR(path_cstr.as_ptr()),
+                FILE_GENERIC_READ.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )?;
+
+            if handle.is_invalid() {
+                return Err(Error::Io(std::io::Error::last_os_error()));
+            }
+
+            // Get disk size using IOCTL_DISK_GET_DRIVE_GEOMETRY_EX
+            let size = Self::get_disk_size(handle)?;
+
+            Ok(Self {
+                handle,
+                size,
+                offset,
+            })
+        }
+    }
+
+    unsafe fn get_disk_size(handle: HANDLE) -> Result<u64> {
+        // Query disk geometry using IOCTL
+        #[repr(C)]
+        struct DISK_GEOMETRY_EX {
+            geometry: [u8; 24], // DISK_GEOMETRY structure
+            disk_size: i64,
+            data: [u8; 1],
+        }
+
+        let mut geometry = std::mem::zeroed::<DISK_GEOMETRY_EX>();
+        let mut bytes_returned = 0u32;
+
+        let result = DeviceIoControl(
+            handle,
+            IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+            None,
+            0,
+            Some(&mut geometry as *mut _ as *mut _),
+            std::mem::size_of::<DISK_GEOMETRY_EX>() as u32,
+            Some(&mut bytes_returned),
+            None,
+        );
+
+        if result.is_ok() && bytes_returned > 0 {
+            Ok(geometry.disk_size as u64)
+        } else {
+            // Return 0 if query fails to indicate error
+            Ok(0)
+        }
+    }
+
+    pub fn read_block(&mut self, block_num: u64, buffer: &mut [u8]) -> Result<usize> {
+        let offset = block_num * APFS_BLOCK_SIZE as u64;
+        self.seek(SeekFrom::Start(offset))?;
+        self.read(buffer).map_err(Into::into)
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    // Read APFS container superblock to get actual volume size
+    pub fn read_apfs_container_size(&mut self) -> Result<u64> {
+        // APFS container superblock is at block 0
+        let mut buffer = vec![0u8; 4096];
+        self.seek(SeekFrom::Start(0))?;
+        self.read_exact(&mut buffer)?;
+
+        // Parse nx_superblock_t structure
+        // Offset 36: nx_block_size (u32)
+        // Offset 40: nx_block_count (u64)
+        let block_size =
+            u32::from_le_bytes([buffer[36], buffer[37], buffer[38], buffer[39]]) as u64;
+        let block_count = u64::from_le_bytes([
+            buffer[40], buffer[41], buffer[42], buffer[43], buffer[44], buffer[45], buffer[46],
+            buffer[47],
+        ]);
+
+        Ok(block_count * block_size)
+    }
+
+    // Read APFS volume space info (alloced and freed blocks)
+    pub fn read_apfs_volume_space(&mut self) -> Result<(u64, u64)> {
+        // Read container superblock (block 0)
+        let mut buffer = vec![0u8; 4096];
+        self.seek(SeekFrom::Start(0))?;
+        self.read_exact(&mut buffer)?;
+
+        // Extract block size first
+        let block_size =
+            u32::from_le_bytes([buffer[36], buffer[37], buffer[38], buffer[39]]) as u64;
+
+        // Extract nx_omap_oid (offset 160) and nx_fs_oid[0] (offset 184)
+        let nx_omap_oid = u64::from_le_bytes([
+            buffer[160],
+            buffer[161],
+            buffer[162],
+            buffer[163],
+            buffer[164],
+            buffer[165],
+            buffer[166],
+            buffer[167],
+        ]);
+        let volume_oid = u64::from_le_bytes([
+            buffer[184],
+            buffer[185],
+            buffer[186],
+            buffer[187],
+            buffer[188],
+            buffer[189],
+            buffer[190],
+            buffer[191],
+        ]);
+
+        // Check if volume OID is valid
+        if volume_oid == 0 {
+            return Err(Error::Apfs("No volume found in container".to_string()).into());
+        }
+
+        // Read object map (omap_phys_t) at nx_omap_oid
+        self.seek(SeekFrom::Start(nx_omap_oid * block_size))?;
+        self.read_exact(&mut buffer)?;
+
+        // Extract om_tree_oid (offset 48)
+        let om_tree_oid = u64::from_le_bytes([
+            buffer[48], buffer[49], buffer[50], buffer[51], buffer[52], buffer[53], buffer[54],
+            buffer[55],
+        ]);
+
+        // Read B-tree root node
+        self.seek(SeekFrom::Start(om_tree_oid * block_size))?;
+        self.read_exact(&mut buffer)?;
+
+        // Search B-tree for volume_oid
+        let volume_paddr = self.search_btree_node(&buffer, volume_oid)?;
+
+        // Read volume superblock (apfs_superblock_t) at volume_paddr
+        self.seek(SeekFrom::Start(volume_paddr * block_size))?;
+        self.read_exact(&mut buffer)?;
+
+        // Extract apfs_total_blocks_alloced (offset 224) and apfs_total_blocks_freed (offset 232)
+        let alloced = u64::from_le_bytes([
+            buffer[224],
+            buffer[225],
+            buffer[226],
+            buffer[227],
+            buffer[228],
+            buffer[229],
+            buffer[230],
+            buffer[231],
+        ]);
+        let freed = u64::from_le_bytes([
+            buffer[232],
+            buffer[233],
+            buffer[234],
+            buffer[235],
+            buffer[236],
+            buffer[237],
+            buffer[238],
+            buffer[239],
+        ]);
+
+        Ok((alloced, freed))
+    }
+
+    // Optimized B-tree node search - 8-byte aligned scan
+    fn search_btree_node(&self, node: &[u8], target_oid: u64) -> Result<u64> {
+        // Scan btn_data area in 8-byte increments (OIDs are 8-byte aligned)
+        // Start from offset 72, scan in 8-byte steps
+        let mut offset = 72;
+
+        while offset + 32 <= node.len() {
+            // Read potential OID at this 8-byte aligned position
+            let oid = u64::from_le_bytes([
+                node[offset],
+                node[offset + 1],
+                node[offset + 2],
+                node[offset + 3],
+                node[offset + 4],
+                node[offset + 5],
+                node[offset + 6],
+                node[offset + 7],
+            ]);
+
+            if oid == target_oid {
+                // Found match, read paddr from value (16 bytes after key start)
+                let val_offset = offset + 16;
+                if val_offset + 16 <= node.len() {
+                    let paddr = u64::from_le_bytes([
+                        node[val_offset + 8],
+                        node[val_offset + 9],
+                        node[val_offset + 10],
+                        node[val_offset + 11],
+                        node[val_offset + 12],
+                        node[val_offset + 13],
+                        node[val_offset + 14],
+                        node[val_offset + 15],
+                    ]);
+
+                    // Sanity check
+                    if paddr > 0 && paddr < 1000000000 {
+                        return Ok(paddr);
+                    }
+                }
+            }
+
+            offset += 8; // Move to next 8-byte aligned position
+        }
+
+        Err(Error::Apfs("Volume OID not found in object map".to_string()).into())
+    }
+}
+
+impl Read for DiskReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut bytes_read = 0u32;
+        unsafe {
+            ReadFile(self.handle, Some(buf), Some(&mut bytes_read), None)
+                .map_err(|e| std::io::Error::other(e))?;
+        }
+        Ok(bytes_read as usize)
+    }
+}
+
+impl Seek for DiskReader {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let (distance, method) = match pos {
+            SeekFrom::Start(n) => ((self.offset + n) as i64, FILE_BEGIN),
+            SeekFrom::Current(n) => (n, FILE_CURRENT),
+            SeekFrom::End(n) => (n, FILE_END),
+        };
+
+        let mut new_pos = 0i64;
+        unsafe {
+            SetFilePointerEx(self.handle, distance, Some(&mut new_pos), method)
+                .map_err(|e| std::io::Error::other(e))?;
+        }
+        Ok((new_pos as u64).saturating_sub(self.offset))
+    }
+}
+
+impl Drop for DiskReader {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
