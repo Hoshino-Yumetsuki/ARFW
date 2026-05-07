@@ -34,7 +34,7 @@ impl DeviceMonitor {
 
             match Self::scan_disk_for_apfs(&disk_path, disk_num) {
                 Ok(mut disk_partitions) => partitions.append(&mut disk_partitions),
-                Err(_) => break, // Stop when we can't open a disk
+                Err(_) => continue, // Skip disks we can't open
             }
         }
 
