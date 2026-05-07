@@ -8,6 +8,7 @@ rust-version = "1.75"
 apfs = "^0.2.4"
 winfsp = "^0.12.4"
 windows = { version = "^0.62", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_Security", "Win32_System_Registry", "Win32_System_LibraryLoader", "Win32_Devices_DeviceAndDriverInstallation"] }
+windows-service = "^0.8"
 crossbeam-channel = "^0.5"
 clap = { version = "^4.5", features = ["derive"] }
 anyhow = "^1.0"

@@ -11,6 +11,8 @@ use windows::Win32::System::LibraryLoader::SetDllDirectoryW;
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 use winfsp::host::{FileSystemHost, VolumeParams};
 
+mod service;
+
 #[derive(Parser, Debug)]
 #[command(name = "arfw")]
 #[command(about = "APFS filesystem read only support for Windows", long_about = None)]
@@ -45,6 +47,12 @@ enum Command {
         #[arg(short = 'd', long = "debug")]
         debug: bool,
     },
+    /// Install as Windows service (requires admin privileges)
+    Install,
+    /// Uninstall Windows service (requires admin privileges)
+    Uninstall,
+    #[command(hide = true)]
+    Service,
 }
 
 fn setup_winfsp_dll_path() -> anyhow::Result<()> {
@@ -142,6 +150,16 @@ fn run_daemon(debug: bool) -> anyhow::Result<()> {
     let level = if debug { "debug" } else { "info" };
     tracing_subscriber::fmt().with_env_filter(level).init();
 
+    let (signal_tx, signal_rx) = std::sync::mpsc::channel();
+
+    ctrlc::set_handler(move || {
+        let _ = signal_tx.send(());
+    })?;
+
+    run_daemon_internal(signal_rx)
+}
+
+pub fn run_daemon_internal(shutdown_rx: std::sync::mpsc::Receiver<()>) -> anyhow::Result<()> {
     info!("ARFW Daemon v{}", env!("CARGO_PKG_VERSION"));
     info!("Starting APFS daemon...");
 
@@ -149,16 +167,10 @@ fn run_daemon(debug: bool) -> anyhow::Result<()> {
     let mut known_partitions = HashSet::new();
 
     let (device_tx, device_rx) = crossbeam_channel::unbounded();
-    let (signal_tx, signal_rx) = crossbeam_channel::unbounded();
-
-    ctrlc::set_handler(move || {
-        let _ = signal_tx.send(());
-    })?;
 
     let _watcher = DeviceWatcher::new(device_tx)?;
     info!("Device watcher active. Waiting for disk events...");
 
-    // Initial scan
     scan_and_update(&manager, &mut known_partitions);
 
     loop {
@@ -176,9 +188,11 @@ fn run_daemon(debug: bool) -> anyhow::Result<()> {
                     Err(_) => break,
                 }
             }
-            recv(signal_rx) -> _ => {
-                info!("Shutting down daemon...");
-                break;
+            default(std::time::Duration::from_millis(100)) => {
+                if shutdown_rx.try_recv().is_ok() {
+                    info!("Shutting down daemon...");
+                    break;
+                }
             }
         }
     }
@@ -243,6 +257,12 @@ fn main() -> anyhow::Result<()> {
             debug,
         }) => run_manual_mount(device, mount_point, volume_index, debug),
         Some(Command::Daemon { debug }) => run_daemon(debug),
+        Some(Command::Install) => service::install_service(),
+        Some(Command::Uninstall) => service::uninstall_service(),
+        Some(Command::Service) => {
+            tracing_subscriber::fmt().with_env_filter("info").init();
+            service::run_service_dispatcher()
+        }
         None => run_daemon(false),
     }
 }
