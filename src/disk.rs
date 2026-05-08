@@ -26,8 +26,11 @@ impl DiskReader {
     pub fn open_with_offset(path: &str, offset: u64) -> Result<Self> {
         let path_cstr = format!("{}\0", path);
 
-        unsafe {
-            let handle = CreateFileA(
+        // SAFETY: `path_cstr` is a null-terminated byte string that outlives
+        // this synchronous CreateFileA call. CreateFileA does not retain the
+        // pointer after returning.
+        let handle = unsafe {
+            CreateFileA(
                 PCSTR(path_cstr.as_ptr()),
                 FILE_GENERIC_READ.0,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -35,22 +38,21 @@ impl DiskReader {
                 OPEN_EXISTING,
                 FILE_ATTRIBUTE_NORMAL,
                 None,
-            )?;
+            )?
+        };
 
-            if handle.is_invalid() {
-                return Err(Error::Io(std::io::Error::last_os_error()));
-            }
-
-            // Get disk size using IOCTL_DISK_GET_DRIVE_GEOMETRY_EX
-            let size = Self::get_disk_size(handle)?;
-
-            Ok(Self {
-                handle,
-                size,
-                offset,
-                device_path: path.to_string(),
-            })
+        if handle.is_invalid() {
+            return Err(Error::Io(std::io::Error::last_os_error()));
         }
+
+        let size = Self::get_disk_size(handle).unwrap_or(0);
+
+        Ok(Self {
+            handle,
+            size,
+            offset,
+            device_path: path.to_string(),
+        })
     }
 
     /// Open a second independent handle to the same device for raw positioned reads.
@@ -84,6 +86,9 @@ impl DiskReader {
         let mut tmp = vec![0u8; aligned_len];
         let mut bytes_read = 0u32;
 
+        // SAFETY: `aligned_offset as i64` is safe for any disk < 9.2 EB (not
+        // a practical concern). SetFilePointerEx is synchronous and does not
+        // retain any pointer after returning.
         unsafe {
             SetFilePointerEx(self.handle, aligned_offset as i64, None, FILE_BEGIN)
                 .map_err(|e| Error::Io(std::io::Error::other(e)))?;
@@ -104,35 +109,52 @@ impl DiskReader {
         self.read_at_absolute(self.offset + physical_offset, buf)
     }
 
-    unsafe fn get_disk_size(handle: HANDLE) -> Result<u64> {
-        // Query disk geometry using IOCTL
+    fn get_disk_size(handle: HANDLE) -> Result<u64> {
+        // Query disk geometry using IOCTL_DISK_GET_DRIVE_GEOMETRY_EX.
+        // DISK_GEOMETRY_EX is a variable-length struct; we only need the fixed
+        // header (geometry + disk_size), so we define a minimal repr(C) overlay.
         #[repr(C)]
         struct DISK_GEOMETRY_EX {
-            geometry: [u8; 24], // DISK_GEOMETRY structure
+            geometry: [u8; 24], // DISK_GEOMETRY (fixed-size header)
             disk_size: i64,
             data: [u8; 1],
         }
 
+        // SAFETY: DISK_GEOMETRY_EX contains only integer/array fields; all-zeros
+        // is a valid bit pattern and the struct is immediately overwritten by
+        // DeviceIoControl before any field is read.
         let mut geometry = unsafe { std::mem::zeroed::<DISK_GEOMETRY_EX>() };
         let mut bytes_returned = 0u32;
 
-        let result = unsafe { DeviceIoControl(
-            handle,
-            IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-            None,
-            0,
-            Some(&mut geometry as *mut _ as *mut _),
-            std::mem::size_of::<DISK_GEOMETRY_EX>() as u32,
-            Some(&mut bytes_returned),
-            None,
-        ) };
+        // SAFETY: `handle` is a valid open disk handle passed by the caller.
+        // `geometry` lives for the duration of this call and its size matches
+        // the output buffer length we advertise to the kernel.
+        let result = unsafe {
+            DeviceIoControl(
+                handle,
+                IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+                None,
+                0,
+                Some(&mut geometry as *mut _ as *mut _),
+                std::mem::size_of::<DISK_GEOMETRY_EX>() as u32,
+                Some(&mut bytes_returned),
+                None,
+            )
+        };
 
-        if result.is_ok() && bytes_returned > 0 {
-            Ok(geometry.disk_size as u64)
-        } else {
-            // Return 0 if query fails to indicate error
-            Ok(0)
+        if result.is_err() || bytes_returned == 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
         }
+
+        // disk_size is documented as always non-negative; guard against a
+        // malformed driver response that could wrap on the cast.
+        if geometry.disk_size < 0 {
+            return Err(Error::Io(std::io::Error::other(
+                "IOCTL_DISK_GET_DRIVE_GEOMETRY_EX returned negative disk size",
+            )));
+        }
+
+        Ok(geometry.disk_size as u64)
     }
 
     pub fn read_block(&mut self, block_num: u64, buffer: &mut [u8]) -> Result<usize> {
@@ -308,6 +330,9 @@ impl Read for DiskReader {
         // Raw disk devices require reads to be sector-aligned in both offset and length.
         // Get current position to determine alignment.
         let mut current_pos = 0i64;
+        // SAFETY: Querying the current file pointer position by seeking 0 bytes
+        // from FILE_CURRENT. The output pointer `&mut current_pos` is valid for
+        // the duration of this synchronous call.
         unsafe {
             SetFilePointerEx(self.handle, 0, Some(&mut current_pos), FILE_CURRENT)
                 .map_err(|e| std::io::Error::other(e))?;
@@ -325,6 +350,10 @@ impl Read for DiskReader {
         let mut tmp = vec![0u8; aligned_len];
         let mut bytes_read = 0u32;
 
+        // SAFETY: Both SetFilePointerEx and ReadFile are synchronous. `tmp` is
+        // a live Vec<u8> sized to `aligned_len`; the Windows crate passes its
+        // pointer and length internally. The aligned_pos cast to i64 is safe for
+        // any disk < 9.2 EB.
         unsafe {
             // Seek to aligned position first.
             SetFilePointerEx(self.handle, aligned_pos as i64, None, FILE_BEGIN)
@@ -339,6 +368,7 @@ impl Read for DiskReader {
         buf[..to_copy].copy_from_slice(&tmp[sector_offset..sector_offset + to_copy]);
 
         // Restore file pointer to pos + to_copy.
+        // SAFETY: Synchronous seek; cast to i64 is safe for any disk < 9.2 EB.
         unsafe {
             SetFilePointerEx(self.handle, (pos + to_copy as u64) as i64, None, FILE_BEGIN)
                 .map_err(|e| std::io::Error::other(e))?;
@@ -357,6 +387,9 @@ impl Seek for DiskReader {
         };
 
         let mut new_pos = 0i64;
+        // SAFETY: Synchronous seek. `distance` and `method` are derived from
+        // the SeekFrom argument; `new_pos` is a valid output pointer for the
+        // duration of this call.
         unsafe {
             SetFilePointerEx(self.handle, distance, Some(&mut new_pos), method)
                 .map_err(|e| std::io::Error::other(e))?;
@@ -367,15 +400,21 @@ impl Seek for DiskReader {
 
 impl Drop for DiskReader {
     fn drop(&mut self) {
+        // SAFETY: `self.handle` is a valid open HANDLE created in
+        // `open_with_offset`. CloseHandle is called exactly once here in Drop.
+        // Errors are intentionally ignored — there is no meaningful recovery
+        // action in a destructor.
         unsafe {
             let _ = CloseHandle(self.handle);
         }
     }
 }
 
-// SAFETY: DiskReader's read_at() uses OVERLAPPED positioned I/O which is
-// thread-safe on Windows — multiple threads can issue concurrent ReadFile calls
-// on the same HANDLE with different OVERLAPPED structs. The sequential Read+Seek
-// impl is only used by ApfsVolume (single-threaded via Mutex), not by raw_disk.
+// SAFETY: `DiskReader` owns a Windows HANDLE which is safe to move across
+// threads — the OS does not associate HANDLEs with the creating thread.
+// `read_at_absolute` uses SetFilePointerEx + ReadFile without OVERLAPPED, which
+// is NOT concurrently safe on the same handle. All callers that share a
+// DiskReader across threads (e.g. ApfsDriver) wrap it in Arc<Mutex<DiskReader>>,
+// which serialises access and upholds the single-writer invariant required here.
+// DiskReader must NOT be used concurrently without an external Mutex.
 unsafe impl Send for DiskReader {}
-unsafe impl Sync for DiskReader {}

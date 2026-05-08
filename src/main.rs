@@ -59,6 +59,13 @@ fn setup_winfsp_dll_path() -> anyhow::Result<()> {
     let mut path = [0u16; 260];
     let mut size = (path.len() * std::mem::size_of::<u16>()) as u32;
 
+    // SAFETY: `path` is a fixed-size stack buffer [0u16; 260]. `size` is
+    // initialised to the buffer's byte length so RegGetValueW will not write
+    // beyond it. The type-erased `*mut _` cast is the standard pattern for
+    // registry API output buffers.
+    // `wide` is a null-terminated UTF-16 Vec<u16> that outlives the
+    // synchronous SetDllDirectoryW call; the function does not retain the
+    // pointer after returning.
     unsafe {
         let result = RegGetValueW(
             HKEY_LOCAL_MACHINE,
