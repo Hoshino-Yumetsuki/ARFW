@@ -13,7 +13,7 @@ use winfsp::{FspError, U16CStr};
 /// Cached extent map entry: (logical_start_bytes, physical_start_bytes, length_bytes)
 type ExtentEntry = (u64, u64, u64);
 
-/// Cached metadata for a path — stored in the LRU cache.
+/// Cached metadata for a path.
 #[derive(Clone)]
 struct CachedStat {
     stat: FileStat,
@@ -26,21 +26,18 @@ struct CachedStat {
     extents_resolved: bool,
 }
 
-/// Capacity of the path stat cache.
-/// 4096 entries covers typical directory listings without excessive memory use.
 const STAT_CACHE_CAPACITY: usize = 4096;
 
 pub struct ApfsDriver {
     /// Used exclusively for metadata operations (stat, list_directory, open).
-    /// Protected by Mutex because ApfsVolume uses sequential Read+Seek internally.
     volume: Arc<Mutex<ApfsVolume<DiskReader>>>,
-    /// Second independent handle to the same device for raw positioned reads.
-    /// No Mutex needed: Windows HANDLE + OVERLAPPED I/O is thread-safe.
-    raw_disk: Arc<DiskReader>,
+    /// Raw handle (offset=0) for positioned reads. Mutex required because
+    /// SetFilePointerEx+ReadFile is not atomic.
+    raw_disk: Arc<Mutex<DiskReader>>,
+    /// Partition offset in bytes — added to extent physical addresses before reading.
+    partition_offset: u64,
     disk_size: u64,
     /// LRU cache: path -> CachedStat.
-    /// Eliminates repeated B-tree traversals for the same path.
-    /// Protected by its own Mutex so reads don't block on `volume`.
     stat_cache: Mutex<LruCache<String, CachedStat>>,
 }
 
@@ -55,7 +52,8 @@ pub struct ApfsFileContext {
 
 impl ApfsDriver {
     pub fn new(disk: DiskReader) -> Result<Self> {
-        let raw_disk = disk.reopen()?;
+        let partition_offset = disk.partition_offset();
+        let raw_disk = disk.reopen_raw()?;
 
         let mut meta_disk = disk.reopen()?;
         let disk_size = meta_disk
@@ -66,7 +64,8 @@ impl ApfsDriver {
 
         Ok(Self {
             volume: Arc::new(Mutex::new(volume)),
-            raw_disk: Arc::new(raw_disk),
+            raw_disk: Arc::new(Mutex::new(raw_disk)),
+            partition_offset,
             disk_size,
             stat_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(STAT_CACHE_CAPACITY).unwrap(),
@@ -91,12 +90,10 @@ impl ApfsDriver {
         }
     }
 
-    /// Look up a path: check cache first, fall back to B-tree traversal.
     fn get_cached_stat(&self, path: &str) -> Option<CachedStat> {
         self.stat_cache.lock().unwrap().get(path).cloned()
     }
 
-    /// Store a stat result in the cache.
     fn put_cached_stat(&self, path: String, entry: CachedStat) {
         self.stat_cache.lock().unwrap().put(path, entry);
     }
@@ -148,7 +145,6 @@ impl FileSystemContext for ApfsDriver {
     ) -> winfsp::Result<FileSecurity> {
         let path = self.u16_to_path(file_name);
 
-        // Fast path: root is always a directory.
         if path == "/" || path.is_empty() {
             return Ok(FileSecurity {
                 reparse: false,
@@ -157,7 +153,6 @@ impl FileSystemContext for ApfsDriver {
             });
         }
 
-        // Check cache first — avoids B-tree traversal on repeated lookups.
         if let Some(cached) = self.get_cached_stat(&path) {
             return Ok(FileSecurity {
                 reparse: false,
@@ -166,7 +161,6 @@ impl FileSystemContext for ApfsDriver {
             });
         }
 
-        // Cache miss: do the B-tree traversal and populate cache.
         let mut vol = self.volume.lock().unwrap();
         let (stat, extent_map, file_size) = vol
             .stat_and_extents(&path)
@@ -200,14 +194,9 @@ impl FileSystemContext for ApfsDriver {
     ) -> winfsp::Result<Self::FileContext> {
         let path = self.u16_to_path(file_name);
 
-        // get_security_by_name is always called before open() by WinFSP,
-        // so the cache should already be warm. This avoids a second B-tree traversal.
-        // IMPORTANT: if the cached entry has extents_resolved=false (populated from
-        // list_directory), we must still resolve the extent map before returning.
         let cached = match self.get_cached_stat(&path) {
             Some(c) if c.extents_resolved || c.stat.kind == EntryKind::Directory => c,
             _ => {
-                // Either cache miss or stat-only entry — resolve full stat+extents.
                 let mut vol = self.volume.lock().unwrap();
                 let (stat, extent_map, file_size) = vol
                     .stat_and_extents(&path)
@@ -255,6 +244,9 @@ impl FileSystemContext for ApfsDriver {
             return Ok(0);
         }
 
+        // Use cached extent map + raw_disk for direct positioned reads.
+        // No B-tree traversal, no seek state contention with the metadata volume.
+        let disk = self.raw_disk.lock().unwrap();
         let mut total_read = 0usize;
 
         while total_read < to_read {
@@ -269,13 +261,10 @@ impl FileSystemContext for ApfsDriver {
             }
 
             let chunk_size = ((to_read - total_read) as u64).min(avail) as usize;
+            let abs_offset = self.partition_offset + physical_pos;
 
-            let bytes = self
-                .raw_disk
-                .read_at(
-                    physical_pos,
-                    &mut buffer[total_read..total_read + chunk_size],
-                )
+            let bytes = disk
+                .read_at_absolute(abs_offset, &mut buffer[total_read..total_read + chunk_size])
                 .map_err(|_| FspError::NTSTATUS(0xC0000011u32 as i32))?;
 
             if bytes == 0 {
@@ -304,9 +293,8 @@ impl FileSystemContext for ApfsDriver {
             .map_err(|_| FspError::NTSTATUS(0xC0000103u32 as i32))?;
         drop(vol);
 
-        // Pre-populate the stat cache with all directory entries.
-        // When WinFSP subsequently calls get_security_by_name + open for each
-        // child, those calls will hit the cache instead of doing B-tree lookups.
+        // Pre-populate stat cache with directory entries so subsequent
+        // get_security_by_name + open calls hit the cache instead of B-tree.
         {
             let parent = if context.path == "/" || context.path.is_empty() {
                 String::new()
@@ -322,7 +310,6 @@ impl FileSystemContext for ApfsDriver {
                     format!("{}/{}", parent, entry.name)
                 };
 
-                // Only insert if not already cached (don't evict fresher entries).
                 if !cache.contains(&child_path) {
                     let stat = FileStat {
                         oid: entry.oid,
@@ -335,8 +322,6 @@ impl FileSystemContext for ApfsDriver {
                         mode: 0,
                         nlink: 1,
                     };
-                    // Extent map is not available from list_directory — it will be
-                    // resolved lazily on first open() if cache miss on extents.
                     cache.put(
                         child_path,
                         CachedStat {
@@ -394,7 +379,6 @@ impl FileSystemContext for ApfsDriver {
         context: &Self::FileContext,
         file_info: &mut FileInfo,
     ) -> winfsp::Result<()> {
-        // Check cache first.
         if let Some(cached) = self.get_cached_stat(&context.path) {
             let ft = |n| self.apfs_time_to_filetime(n);
             let attr = |k| self.entry_kind_to_attributes(k);

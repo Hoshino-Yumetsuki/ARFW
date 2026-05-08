@@ -7,7 +7,7 @@ use windows::Win32::Storage::FileSystem::{
     FILE_END, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::IOCTL_DISK_GET_DRIVE_GEOMETRY_EX;
-use windows::Win32::System::IO::{DeviceIoControl, OVERLAPPED};
+use windows::Win32::System::IO::DeviceIoControl;
 
 const APFS_BLOCK_SIZE: usize = 4096;
 
@@ -53,30 +53,55 @@ impl DiskReader {
         }
     }
 
-    /// Open a second independent handle to the same device (for concurrent raw reads).
+    /// Open a second independent handle to the same device for raw positioned reads.
+    /// offset=0 — callers add partition offset explicitly.
+    pub fn reopen_raw(&self) -> Result<Self> {
+        Self::open_with_offset(&self.device_path, 0)
+    }
+
+    /// Open a second independent handle with the same partition offset.
     pub fn reopen(&self) -> Result<Self> {
         Self::open_with_offset(&self.device_path, self.offset)
     }
 
-    /// Read `buf.len()` bytes from the given physical byte offset (relative to partition offset).
-    /// This is a positioned read — does not disturb the seek position used by Read/Seek impls.
-    pub fn read_at(&self, physical_offset: u64, buf: &mut [u8]) -> Result<usize> {
-        let abs_offset = self.offset + physical_offset;
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        overlapped.Anonymous.Anonymous.Offset = abs_offset as u32;
-        overlapped.Anonymous.Anonymous.OffsetHigh = (abs_offset >> 32) as u32;
+    /// Returns the partition offset in bytes.
+    pub fn partition_offset(&self) -> u64 {
+        self.offset
+    }
 
-        let mut bytes_read = 0u32;
-        unsafe {
-            ReadFile(
-                self.handle,
-                Some(buf),
-                Some(&mut bytes_read),
-                Some(&mut overlapped),
-            )
-            .map_err(|e| Error::Io(std::io::Error::other(e)))?;
+    /// Read bytes from an absolute disk offset using SetFilePointerEx + ReadFile.
+    /// Handles sector alignment automatically — raw disk reads must be sector-aligned.
+    pub fn read_at_absolute(&self, absolute_offset: u64, buf: &mut [u8]) -> Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
         }
-        Ok(bytes_read as usize)
+
+        let sector_offset = (absolute_offset % SECTOR_SIZE as u64) as usize;
+        let aligned_offset = absolute_offset - sector_offset as u64;
+        let total_needed = sector_offset + buf.len();
+        let aligned_len = (total_needed + SECTOR_SIZE - 1) / SECTOR_SIZE * SECTOR_SIZE;
+
+        let mut tmp = vec![0u8; aligned_len];
+        let mut bytes_read = 0u32;
+
+        unsafe {
+            SetFilePointerEx(self.handle, aligned_offset as i64, None, FILE_BEGIN)
+                .map_err(|e| Error::Io(std::io::Error::other(e)))?;
+
+            ReadFile(self.handle, Some(&mut tmp), Some(&mut bytes_read), None)
+                .map_err(|e| Error::Io(std::io::Error::other(e)))?;
+        }
+
+        let available = (bytes_read as usize).saturating_sub(sector_offset);
+        let to_copy = available.min(buf.len());
+        buf[..to_copy].copy_from_slice(&tmp[sector_offset..sector_offset + to_copy]);
+
+        Ok(to_copy)
+    }
+
+    /// Read bytes from a partition-relative offset.
+    pub fn read_at(&self, physical_offset: u64, buf: &mut [u8]) -> Result<usize> {
+        self.read_at_absolute(self.offset + physical_offset, buf)
     }
 
     unsafe fn get_disk_size(handle: HANDLE) -> Result<u64> {
@@ -272,14 +297,54 @@ impl DiskReader {
     }
 }
 
+const SECTOR_SIZE: usize = 512;
+
 impl Read for DiskReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let mut bytes_read = 0u32;
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        // Raw disk devices require reads to be sector-aligned in both offset and length.
+        // Get current position to determine alignment.
+        let mut current_pos = 0i64;
         unsafe {
-            ReadFile(self.handle, Some(buf), Some(&mut bytes_read), None)
+            SetFilePointerEx(self.handle, 0, Some(&mut current_pos), FILE_CURRENT)
                 .map_err(|e| std::io::Error::other(e))?;
         }
-        Ok(bytes_read as usize)
+
+        let pos = current_pos as u64;
+        let sector_offset = (pos % SECTOR_SIZE as u64) as usize;
+        let aligned_pos = pos - sector_offset as u64;
+
+        // Round up read length to sector boundary, including any leading offset bytes.
+        let total_needed = sector_offset + buf.len();
+        let aligned_len = (total_needed + SECTOR_SIZE - 1) / SECTOR_SIZE * SECTOR_SIZE;
+
+        // Read into a sector-aligned temporary buffer.
+        let mut tmp = vec![0u8; aligned_len];
+        let mut bytes_read = 0u32;
+
+        unsafe {
+            // Seek to aligned position first.
+            SetFilePointerEx(self.handle, aligned_pos as i64, None, FILE_BEGIN)
+                .map_err(|e| std::io::Error::other(e))?;
+
+            ReadFile(self.handle, Some(&mut tmp), Some(&mut bytes_read), None)
+                .map_err(|e| std::io::Error::other(e))?;
+        }
+
+        let available = (bytes_read as usize).saturating_sub(sector_offset);
+        let to_copy = available.min(buf.len());
+        buf[..to_copy].copy_from_slice(&tmp[sector_offset..sector_offset + to_copy]);
+
+        // Restore file pointer to pos + to_copy.
+        unsafe {
+            SetFilePointerEx(self.handle, (pos + to_copy as u64) as i64, None, FILE_BEGIN)
+                .map_err(|e| std::io::Error::other(e))?;
+        }
+
+        Ok(to_copy)
     }
 }
 
