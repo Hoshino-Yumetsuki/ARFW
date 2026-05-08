@@ -7,7 +7,7 @@ use windows::Win32::Storage::FileSystem::{
     FILE_END, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::IOCTL_DISK_GET_DRIVE_GEOMETRY_EX;
-use windows::Win32::System::IO::DeviceIoControl;
+use windows::Win32::System::IO::{DeviceIoControl, OVERLAPPED};
 
 const APFS_BLOCK_SIZE: usize = 4096;
 
@@ -15,6 +15,7 @@ pub struct DiskReader {
     handle: HANDLE,
     size: u64,
     offset: u64,
+    device_path: String,
 }
 
 impl DiskReader {
@@ -47,8 +48,35 @@ impl DiskReader {
                 handle,
                 size,
                 offset,
+                device_path: path.to_string(),
             })
         }
+    }
+
+    /// Open a second independent handle to the same device (for concurrent raw reads).
+    pub fn reopen(&self) -> Result<Self> {
+        Self::open_with_offset(&self.device_path, self.offset)
+    }
+
+    /// Read `buf.len()` bytes from the given physical byte offset (relative to partition offset).
+    /// This is a positioned read — does not disturb the seek position used by Read/Seek impls.
+    pub fn read_at(&self, physical_offset: u64, buf: &mut [u8]) -> Result<usize> {
+        let abs_offset = self.offset + physical_offset;
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        overlapped.Anonymous.Anonymous.Offset = abs_offset as u32;
+        overlapped.Anonymous.Anonymous.OffsetHigh = (abs_offset >> 32) as u32;
+
+        let mut bytes_read = 0u32;
+        unsafe {
+            ReadFile(
+                self.handle,
+                Some(buf),
+                Some(&mut bytes_read),
+                Some(&mut overlapped),
+            )
+            .map_err(|e| Error::Io(std::io::Error::other(e)))?;
+        }
+        Ok(bytes_read as usize)
     }
 
     unsafe fn get_disk_size(handle: HANDLE) -> Result<u64> {
@@ -279,3 +307,10 @@ impl Drop for DiskReader {
         }
     }
 }
+
+// SAFETY: DiskReader's read_at() uses OVERLAPPED positioned I/O which is
+// thread-safe on Windows — multiple threads can issue concurrent ReadFile calls
+// on the same HANDLE with different OVERLAPPED structs. The sequential Read+Seek
+// impl is only used by ApfsVolume (single-threaded via Mutex), not by raw_disk.
+unsafe impl Send for DiskReader {}
+unsafe impl Sync for DiskReader {}
