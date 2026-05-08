@@ -4,8 +4,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 use windows_service::define_windows_service;
 use windows_service::service::{
-    ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
-    ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+    ServiceAccess, ServiceControl, ServiceControlAccept, ServiceDependency, ServiceErrorControl,
+    ServiceExitCode, ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_dispatcher;
@@ -14,6 +14,14 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 const SERVICE_NAME: &str = "ARFW";
 const SERVICE_DISPLAY_NAME: &str = "APFS Read-only File System for Windows";
 const SERVICE_DESCRIPTION: &str = "Automatically mounts APFS partitions as read-only drives";
+
+/// WinFsp user-mode launcher service. Starting it ensures the kernel driver is loaded.
+const WINFSP_LAUNCHER_SERVICE: &str = "WinFsp.Launcher";
+
+/// How long to wait for WinFsp to become available at service startup.
+const WINFSP_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Poll interval while waiting for WinFsp.
+const WINFSP_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -30,7 +38,11 @@ pub fn install_service() -> Result<()> {
         error_control: ServiceErrorControl::Normal,
         executable_path: exe_path,
         launch_arguments: vec![OsString::from("service")],
-        dependencies: vec![],
+        // Declare WinFsp.Launcher as a dependency so SCM starts it first.
+        // WinFsp.Launcher ensures the WinFsp kernel driver is loaded before we run.
+        dependencies: vec![ServiceDependency::Service(OsString::from(
+            WINFSP_LAUNCHER_SERVICE,
+        ))],
         account_name: None,
         account_password: None,
     };
@@ -103,6 +115,52 @@ fn run_service() -> Result<()> {
     };
 
     let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
+
+    // Report StartPending while waiting for WinFsp DLL to become loadable.
+    // This handles the race where ARFW starts before WinFsp.Launcher has fully
+    // initialized the kernel driver, even with the service dependency declared.
+    let mut checkpoint = 0u32;
+    let deadline = std::time::Instant::now() + WINFSP_WAIT_TIMEOUT;
+
+    loop {
+        if winfsp::winfsp_init().is_ok() {
+            break;
+        }
+
+        if std::time::Instant::now() >= deadline {
+            tracing::error!(
+                "WinFsp did not become available within {:?}",
+                WINFSP_WAIT_TIMEOUT
+            );
+            status_handle.set_service_status(ServiceStatus {
+                service_type: ServiceType::OWN_PROCESS,
+                current_state: ServiceState::Stopped,
+                controls_accepted: ServiceControlAccept::empty(),
+                exit_code: ServiceExitCode::ServiceSpecific(1),
+                checkpoint: 0,
+                wait_hint: Duration::default(),
+                process_id: None,
+            })?;
+            anyhow::bail!("WinFsp not available after {:?}", WINFSP_WAIT_TIMEOUT);
+        }
+
+        checkpoint += 1;
+        status_handle.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::StartPending,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint,
+            wait_hint: WINFSP_WAIT_TIMEOUT,
+            process_id: None,
+        })?;
+
+        tracing::info!("Waiting for WinFsp... (attempt {})", checkpoint);
+        std::thread::sleep(WINFSP_POLL_INTERVAL);
+    }
+
+    // WinFsp DLL is loaded — initialize the FSP subsystem.
+    let _fsp = winfsp::winfsp_init_or_die();
 
     status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,

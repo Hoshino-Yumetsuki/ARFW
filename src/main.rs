@@ -245,9 +245,16 @@ fn scan_and_update(manager: &MountManager, known_partitions: &mut HashSet<(u32, 
 
 fn main() -> anyhow::Result<()> {
     setup_winfsp_dll_path()?;
-    let _fsp = winfsp::winfsp_init_or_die();
 
     let args = Args::parse();
+
+    // For the Service command, WinFsp initialization is handled inside run_service()
+    // with a retry loop — WinFsp may not be available yet at service startup time.
+    // For all other commands, initialize immediately and die on failure.
+    let _fsp = match args.command {
+        Some(Command::Service) => None,
+        _ => Some(winfsp::winfsp_init_or_die()),
+    };
 
     match args.command {
         Some(Command::Mount {
