@@ -113,10 +113,10 @@ impl DiskReader {
             data: [u8; 1],
         }
 
-        let mut geometry = std::mem::zeroed::<DISK_GEOMETRY_EX>();
+        let mut geometry = unsafe { std::mem::zeroed::<DISK_GEOMETRY_EX>() };
         let mut bytes_returned = 0u32;
 
-        let result = DeviceIoControl(
+        let result = unsafe { DeviceIoControl(
             handle,
             IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
             None,
@@ -125,7 +125,7 @@ impl DiskReader {
             std::mem::size_of::<DISK_GEOMETRY_EX>() as u32,
             Some(&mut bytes_returned),
             None,
-        );
+        ) };
 
         if result.is_ok() && bytes_returned > 0 {
             Ok(geometry.disk_size as u64)

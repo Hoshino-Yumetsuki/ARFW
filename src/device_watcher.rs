@@ -75,7 +75,7 @@ impl DeviceWatcher {
             return 0;
         }
 
-        let sender = &*(context as *const Sender<DeviceEvent>);
+        let sender = unsafe { &*(context as *const Sender<DeviceEvent>) };
 
         let event = match action {
             CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL => Some(DeviceEvent::Added),
