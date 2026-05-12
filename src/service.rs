@@ -15,12 +15,12 @@ const SERVICE_NAME: &str = "ARFW";
 const SERVICE_DISPLAY_NAME: &str = "APFS Read-only File System for Windows";
 const SERVICE_DESCRIPTION: &str = "Automatically mounts APFS partitions as read-only drives";
 
-/// WinFsp user-mode launcher service. Starting it ensures the kernel driver is loaded.
+/// WinFsp user-mode launcher service. Starting it ensures the kernel driver is loaded
 const WINFSP_LAUNCHER_SERVICE: &str = "WinFsp.Launcher";
 
-/// How long to wait for WinFsp to become available at service startup.
+/// How long to wait for WinFsp to become available at service startup
 const WINFSP_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
-/// Poll interval while waiting for WinFsp.
+/// Poll interval while waiting for WinFsp
 const WINFSP_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 define_windows_service!(ffi_service_main, service_main);
@@ -38,8 +38,8 @@ pub fn install_service() -> Result<()> {
         error_control: ServiceErrorControl::Normal,
         executable_path: exe_path,
         launch_arguments: vec![OsString::from("service")],
-        // Declare WinFsp.Launcher as a dependency so SCM starts it first.
-        // WinFsp.Launcher ensures the WinFsp kernel driver is loaded before we run.
+        // Declare WinFsp.Launcher as a dependency so SCM starts it first
+        // WinFsp.Launcher ensures the WinFsp kernel driver is loaded before we run
         dependencies: vec![ServiceDependency::Service(OsString::from(
             WINFSP_LAUNCHER_SERVICE,
         ))],
@@ -116,9 +116,9 @@ fn run_service() -> Result<()> {
 
     let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
 
-    // Report StartPending while waiting for WinFsp DLL to become loadable.
+    // Report StartPending while waiting for WinFsp DLL to become loadable
     // This handles the race where ARFW starts before WinFsp.Launcher has fully
-    // initialized the kernel driver, even with the service dependency declared.
+    // initialized the kernel driver, even with the service dependency declared
     let mut checkpoint = 0u32;
     let deadline = std::time::Instant::now() + WINFSP_WAIT_TIMEOUT;
 
@@ -159,7 +159,7 @@ fn run_service() -> Result<()> {
         std::thread::sleep(WINFSP_POLL_INTERVAL);
     }
 
-    // WinFsp DLL is loaded — initialize the FSP subsystem.
+    // WinFsp DLL is loaded; initialize the FSP subsystem
     let _fsp = winfsp::winfsp_init_or_die();
 
     status_handle.set_service_status(ServiceStatus {

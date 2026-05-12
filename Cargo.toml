@@ -5,10 +5,7 @@ edition = "2024"
 rust-version = "1.94.0"
 
 [dependencies]
-apfs = "^0.2.4"
-winfsp = "^0.12.4"
-windows = { version = "^0.62", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_Security", "Win32_System_Registry", "Win32_System_LibraryLoader", "Win32_Devices_DeviceAndDriverInstallation"] }
-windows-service = "^0.8"
+# Cross-platform deps (used by both lib + bin)
 crossbeam-channel = "^0.5"
 clap = { version = "^4.5", features = ["derive"] }
 anyhow = "^1.0"
@@ -18,8 +15,16 @@ tracing-subscriber = { version = "^0.3", features = ["env-filter"] }
 ctrlc = "^3.4"
 lru = { version = "^0.18.0", features = ["hashbrown"] }
 
-[build-dependencies]
+# Windows-only deps (WinFSP host + Win32 device APIs)
+[target.'cfg(windows)'.dependencies]
 winfsp = "^0.12.4"
+windows = { version = "^0.62", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_Security", "Win32_System_Registry", "Win32_System_LibraryLoader", "Win32_Devices_DeviceAndDriverInstallation"] }
+windows-service = "^0.8"
+
+[target.'cfg(windows)'.build-dependencies]
+winfsp = "^0.12.4"
+
+[build-dependencies]
 
 [dev-dependencies]
 tempfile = "^3.10"
@@ -27,6 +32,3 @@ tempfile = "^3.10"
 [[bin]]
 name = "arfw"
 path = "src/main.rs"
-
-[patch.crates-io]
-apfs = { path = "vendor/apfs" }

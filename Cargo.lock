@@ -74,19 +74,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "apfs"
-version = "0.2.4"
-dependencies = [
- "byteorder",
- "thiserror",
-]
-
-[[package]]
 name = "arfw"
 version = "1.0.0"
 dependencies = [
  "anyhow",
- "apfs",
  "clap",
  "crossbeam-channel",
  "ctrlc",
@@ -140,12 +131,6 @@ name = "bytemuck"
 version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
-
-[[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "cexpr"
