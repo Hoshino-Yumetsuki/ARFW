@@ -2,6 +2,7 @@
 //! Skipped when the fixture has not been built (Linux/Windows CI)
 mod common;
 
+use arfw::apfs::ApfsVolume;
 use arfw::apfs::superblock::{NX_MAGIC, read_nxsb};
 
 #[test]
@@ -17,6 +18,19 @@ fn fixture_opens_and_has_valid_nxsb() {
     assert_eq!(nxsb.magic, NX_MAGIC, "container magic mismatch");
     assert!(nxsb.block_size >= 512 && nxsb.block_size.is_power_of_two());
     assert!(nxsb.fs_oids.iter().any(|&o| o != 0));
+}
+
+#[test]
+fn fixture_reports_generated_volume_name() {
+    let reader = match common::open_fixture() {
+        Some(r) => r,
+        None => {
+            common::skip_no_fixture("fixture_reports_generated_volume_name");
+            return;
+        }
+    };
+    let volume = ApfsVolume::open(reader).expect("open APFS volume");
+    assert_eq!(volume.volume_info().name, "ApfsTest");
 }
 
 #[test]

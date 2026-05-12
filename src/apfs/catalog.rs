@@ -95,7 +95,6 @@ pub fn cmp_catalog_keys(a: &[u8], b: &[u8]) -> Ordering {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Tiny LE helpers: keep this crate dependency-free
 // ---------------------------------------------------------------------------
@@ -354,7 +353,12 @@ impl FileExtentVal {
         self.flags_and_length & 0x00FF_FFFF_FFFF_FFFF
     }
 
-    pub fn from_length_and_flags(length: u64, flags: u8, phys_block_num: u64, crypto_id: u64) -> Self {
+    pub fn from_length_and_flags(
+        length: u64,
+        flags: u8,
+        phys_block_num: u64,
+        crypto_id: u64,
+    ) -> Self {
         debug_assert_eq!(length & 0xFF00_0000_0000_0000, 0, "length exceeds 56 bits");
         let flags_and_length = (length & 0x00FF_FFFF_FFFF_FFFF) | ((flags as u64) << 56);
         Self {
@@ -413,9 +417,9 @@ fn decode_drec_name(key: &[u8]) -> Result<String> {
     }
     let nlh = rd_u32(key, 8);
     let name_len = (nlh & 0x0000_03FF) as usize;
-    let name_end = 12usize.checked_add(name_len).ok_or_else(|| {
-        ApfsError::BadBTree("drec name length overflow".into())
-    })?;
+    let name_end = 12usize
+        .checked_add(name_len)
+        .ok_or_else(|| ApfsError::BadBTree("drec name length overflow".into()))?;
     if name_end > key.len() {
         return Err(ApfsError::BadBTree(format!(
             "drec name extends past key: end={name_end}, len={}",
@@ -533,8 +537,12 @@ pub fn list_directory<R: Read + Seek>(
 
     let mut out = Vec::with_capacity(raw.len());
     for (key, val) in raw {
-        let Ok(name) = decode_drec_name(&key) else { continue };
-        let Ok(drec) = DrecVal::parse(&val) else { continue };
+        let Ok(name) = decode_drec_name(&key) else {
+            continue;
+        };
+        let Ok(drec) = DrecVal::parse(&val) else {
+            continue;
+        };
         let kind = match drec.file_type() {
             DT_DIR => EntryKind::Directory,
             DT_LNK => EntryKind::Symlink,
@@ -710,9 +718,8 @@ pub fn set_inode_dstream_size_in_node(
         }
         let xfields_off = InodeVal::FIXED_SIZE;
         let xfields = &val[xfields_off..];
-        let (rel_start, rel_end) = locate_dstream_size_range(xfields).ok_or_else(|| {
-            ApfsError::BadCatalog(format!("inode {oid} has no dstream xfield"))
-        })?;
+        let (rel_start, rel_end) = locate_dstream_size_range(xfields)
+            .ok_or_else(|| ApfsError::BadCatalog(format!("inode {oid} has no dstream xfield")))?;
         let mut new_val = val.to_vec();
         new_val[xfields_off + rel_start..xfields_off + rel_end]
             .copy_from_slice(&new_size.to_le_bytes());
@@ -751,7 +758,9 @@ pub fn find_record_in_node(
             continue;
         }
         if let Some(name) = drec_name {
-            let Ok(decoded) = decode_drec_name(key) else { continue };
+            let Ok(decoded) = decode_drec_name(key) else {
+                continue;
+            };
             if decoded != name {
                 continue;
             }
@@ -764,11 +773,7 @@ pub fn find_record_in_node(
 /// Delete every entry in `node` whose key matches `(oid, j_type)`. Returns
 /// the count removed. Used for sweeping all `J_TYPE_FILE_EXTENT` records
 /// of a file out of one leaf in a single pass
-pub fn delete_records_in_node(
-    node: &mut BTreeNode,
-    oid: u64,
-    j_type: u8,
-) -> Result<usize> {
+pub fn delete_records_in_node(node: &mut BTreeNode, oid: u64, j_type: u8) -> Result<usize> {
     if !node.is_leaf() {
         return Err(ApfsError::BadBTree(
             "delete_records_in_node: target is not a leaf".into(),
@@ -970,10 +975,7 @@ pub fn inc_inode_counter_in_node(node: &mut BTreeNode, oid: u64) -> Result<usize
 /// Build a serialised inode value with an optional `j_dstream_t` xfield
 /// holding `dstream_size`. Pass `None` to omit the xfield (used for
 /// directories and zero-length files)
-pub fn build_inode_value(
-    template: &InodeVal,
-    dstream: Option<JDstream>,
-) -> Result<Vec<u8>> {
+pub fn build_inode_value(template: &InodeVal, dstream: Option<JDstream>) -> Result<Vec<u8>> {
     let xfields = match dstream {
         None => Vec::new(),
         Some(ds) => build_dstream_xfields(&ds),
@@ -1042,17 +1044,15 @@ pub fn set_inode_dstream_size_and_alloc_in_node(
         let val = node.value_at(i, 0)?;
         let xfields_off = InodeVal::FIXED_SIZE;
         let xfields = &val[xfields_off..];
-        let (rel_start, rel_end) = locate_dstream_size_range(xfields).ok_or_else(|| {
-            ApfsError::BadCatalog(format!("inode {oid} has no dstream xfield"))
-        })?;
+        let (rel_start, rel_end) = locate_dstream_size_range(xfields)
+            .ok_or_else(|| ApfsError::BadCatalog(format!("inode {oid} has no dstream xfield")))?;
         let mut new_val = val.to_vec();
         new_val[xfields_off + rel_start..xfields_off + rel_end]
             .copy_from_slice(&new_size.to_le_bytes());
         // alloced_size sits immediately after `size` in the dstream payload
         let alloced_off = xfields_off + rel_end;
         if alloced_off + 8 <= new_val.len() {
-            new_val[alloced_off..alloced_off + 8]
-                .copy_from_slice(&new_alloced_size.to_le_bytes());
+            new_val[alloced_off..alloced_off + 8].copy_from_slice(&new_alloced_size.to_le_bytes());
         }
         node.replace_value(i, &new_val, 0)?;
         return Ok(i);

@@ -1,12 +1,12 @@
 use crate::error::{Error, Result};
-use windows::core::PCSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileA, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
     OPEN_EXISTING,
 };
-use windows::Win32::System::Ioctl::IOCTL_DISK_GET_DRIVE_LAYOUT_EX;
 use windows::Win32::System::IO::DeviceIoControl;
+use windows::Win32::System::Ioctl::IOCTL_DISK_GET_DRIVE_LAYOUT_EX;
+use windows::core::PCSTR;
 
 /// RAII wrapper for a Windows HANDLE that calls CloseHandle on drop
 /// Guarantees the handle is closed on both success and error paths

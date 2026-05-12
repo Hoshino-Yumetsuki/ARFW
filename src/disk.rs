@@ -1,14 +1,14 @@
 use crate::error::{Error, Result};
 use std::io::{Read, Seek, SeekFrom, Write};
-use windows::core::PCSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileA, FlushFileBuffers, ReadFile, SetFilePointerEx, WriteFile, FILE_ATTRIBUTE_NORMAL,
-    FILE_BEGIN, FILE_CURRENT, FILE_END, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileA, FILE_ATTRIBUTE_NORMAL, FILE_BEGIN, FILE_CURRENT, FILE_END, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers, OPEN_EXISTING,
+    ReadFile, SetFilePointerEx, WriteFile,
 };
-use windows::Win32::System::Ioctl::IOCTL_DISK_GET_DRIVE_GEOMETRY_EX;
 use windows::Win32::System::IO::DeviceIoControl;
+use windows::Win32::System::Ioctl::IOCTL_DISK_GET_DRIVE_GEOMETRY_EX;
+use windows::core::PCSTR;
 
 const APFS_BLOCK_SIZE: usize = 4096;
 

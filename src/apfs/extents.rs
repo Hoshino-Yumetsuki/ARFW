@@ -173,10 +173,20 @@ mod tests {
         for b in &mut disk[2 * block_size as usize..(3 * block_size as usize)] {
             *b = 0xAA;
         }
-        let exts = vec![synthetic_extent(block_size as u64, 1), synthetic_extent(block_size as u64, 2)];
+        let exts = vec![
+            synthetic_extent(block_size as u64, 1),
+            synthetic_extent(block_size as u64, 2),
+        ];
         let mut cursor = std::io::Cursor::new(disk);
         let mut out = Vec::new();
-        let n = read_file_data(&mut cursor, block_size, &exts, 2 * block_size as u64, &mut out).unwrap();
+        let n = read_file_data(
+            &mut cursor,
+            block_size,
+            &exts,
+            2 * block_size as u64,
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(n, 2 * block_size as u64);
         assert!(out[..block_size as usize].iter().all(|b| *b == 0x55));
         assert!(out[block_size as usize..].iter().all(|b| *b == 0xAA));

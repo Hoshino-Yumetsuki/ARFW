@@ -73,10 +73,22 @@ pub fn verify_image<R: Read + Seek>(reader: &mut R) -> Result<VerifyReport> {
 
         let catalog_root =
             omap::omap_lookup(reader, vol_omap_root, block_size, apsb.root_tree_oid)?;
-        walk_btree(reader, catalog_root, block_size, Some(vol_omap_root), &mut report)?;
+        walk_btree(
+            reader,
+            catalog_root,
+            block_size,
+            Some(vol_omap_root),
+            &mut report,
+        )?;
 
         if apsb.extentref_tree_oid != 0 {
-            walk_btree(reader, apsb.extentref_tree_oid, block_size, None, &mut report)?;
+            walk_btree(
+                reader,
+                apsb.extentref_tree_oid,
+                block_size,
+                None,
+                &mut report,
+            )?;
         }
     }
 
@@ -150,7 +162,14 @@ fn walk_btree<R: Read + Seek>(
     report: &mut VerifyReport,
 ) -> Result<()> {
     let mut visited: HashSet<u64> = HashSet::new();
-    walk_btree_node(reader, root_block, block_size, omap_root, report, &mut visited)
+    walk_btree_node(
+        reader,
+        root_block,
+        block_size,
+        omap_root,
+        report,
+        &mut visited,
+    )
 }
 
 fn walk_btree_node<R: Read + Seek>(

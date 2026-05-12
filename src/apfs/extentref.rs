@@ -62,8 +62,7 @@ impl PhysExtVal {
 
     pub fn to_bytes(&self) -> [u8; 20] {
         let mut out = [0u8; 20];
-        let len_and_kind =
-            (self.length & PEXT_LEN_MASK) | ((self.kind as u64) << PEXT_KIND_SHIFT);
+        let len_and_kind = (self.length & PEXT_LEN_MASK) | ((self.kind as u64) << PEXT_KIND_SHIFT);
         out[0..8].copy_from_slice(&len_and_kind.to_le_bytes());
         out[8..16].copy_from_slice(&self.owning_obj_id.to_le_bytes());
         out[16..20].copy_from_slice(&self.refcnt.to_le_bytes());
@@ -211,7 +210,9 @@ pub fn extentref_insert_in_node(
 /// Locate the TOC index of the record matching `paddr` within the leaf
 fn find_record_idx(node: &BTreeNode, paddr: u64) -> Result<Option<usize>> {
     if !node.is_leaf() {
-        return Err(ApfsError::BadBTree("extentref helper called on non-leaf".into()));
+        return Err(ApfsError::BadBTree(
+            "extentref helper called on non-leaf".into(),
+        ));
     }
     for i in 0..node.nkeys() {
         let key = PhysExtKey::parse(node.key_at(i, PHYS_EXT_KEY_SIZE)?)?;

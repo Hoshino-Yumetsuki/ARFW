@@ -207,7 +207,13 @@ pub fn omap_insert_at_leaf<R: Read + Seek>(
             Ordering::Greater => break,
         }
     }
-    node.insert_leaf_fixed(idx, &key.to_bytes(), &val.to_bytes(), OMAP_KEY_SIZE, OMAP_VAL_SIZE)?;
+    node.insert_leaf_fixed(
+        idx,
+        &key.to_bytes(),
+        &val.to_bytes(),
+        OMAP_KEY_SIZE,
+        OMAP_VAL_SIZE,
+    )?;
     // Caller is expected to grab the serialised block via `node.serialize()`
     let _ = node;
     Ok(idx)

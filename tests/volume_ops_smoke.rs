@@ -68,7 +68,9 @@ fn rename_file_within_root() {
     let walk = vol.walk().expect("walk");
     assert!(walk.iter().any(|e| e.path == "/hello_renamed.txt"));
     assert!(walk.iter().all(|e| e.path != "/hello.txt"));
-    let data = vol.read_file("/hello_renamed.txt").expect("read after rename");
+    let data = vol
+        .read_file("/hello_renamed.txt")
+        .expect("read after rename");
     assert!(!data.is_empty());
     let mut f = std::fs::File::open(&cloned.path).expect("reopen");
     verify_image(&mut f).expect("image still verifies");

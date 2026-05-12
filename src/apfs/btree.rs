@@ -16,9 +16,7 @@
 //! TOC entry is sized accordingly
 use crate::apfs::error::{ApfsError, Result};
 use crate::apfs::fletcher;
-use crate::apfs::object::{
-    OBJECT_TYPE_BTREE_NODE, ObjectHeader, read_block,
-};
+use crate::apfs::object::{OBJECT_TYPE_BTREE_NODE, ObjectHeader, read_block};
 use std::cmp::Ordering;
 use std::io::{Read, Seek};
 
@@ -187,7 +185,8 @@ impl BTreeNode {
         // (lookup/scan) plumbs the sizes through
         let mut toc = Vec::with_capacity(nkeys as usize);
         for i in 0..nkeys as usize {
-            let entry_bytes = &block[toc_off + i * toc_entry_size..toc_off + (i + 1) * toc_entry_size];
+            let entry_bytes =
+                &block[toc_off + i * toc_entry_size..toc_off + (i + 1) * toc_entry_size];
             let toc_entry = if fixed_kv {
                 let key_off = u16::from_le_bytes([entry_bytes[0], entry_bytes[1]]);
                 let val_off = u16::from_le_bytes([entry_bytes[2], entry_bytes[3]]);
@@ -254,7 +253,10 @@ impl BTreeNode {
     /// owning tree; for variable-KV nodes pass `0`
     pub fn key_at(&self, i: usize, fixed_key_size: u32) -> Result<&[u8]> {
         let entry = self.toc.get(i).ok_or_else(|| {
-            ApfsError::BadBTree(format!("key index {i} out of range ({} keys)", self.toc.len()))
+            ApfsError::BadBTree(format!(
+                "key index {i} out of range ({} keys)",
+                self.toc.len()
+            ))
         })?;
         let key_off = self.keys_area_start() + entry.key_off as usize;
         let key_len = if self.fixed_kv() {
@@ -356,7 +358,9 @@ impl BTreeNode {
             ));
         }
         if key.len() != fixed_key_size as usize || val.len() != fixed_val_size as usize {
-            return Err(ApfsError::BadBTree("insert_leaf_fixed: size mismatch".into()));
+            return Err(ApfsError::BadBTree(
+                "insert_leaf_fixed: size mismatch".into(),
+            ));
         }
         if idx > self.toc.len() {
             return Err(ApfsError::BadBTree(format!(
@@ -547,12 +551,9 @@ impl BTreeNode {
             // keys_area_start moved forward; the bytes themselves are still
             // at the same absolute offset within the block
             for entry in &mut self.toc {
-                entry.key_off = entry
-                    .key_off
-                    .checked_sub(extra)
-                    .ok_or_else(|| ApfsError::BadBTree(
-                        "insert_leaf_var: toc grow overflowed key_off".into(),
-                    ))?;
+                entry.key_off = entry.key_off.checked_sub(extra).ok_or_else(|| {
+                    ApfsError::BadBTree("insert_leaf_var: toc grow overflowed key_off".into())
+                })?;
             }
         }
         Ok(())
@@ -582,7 +583,8 @@ impl BTreeNode {
     /// Write back the node with a fresh checksum and return the block bytes
     pub fn serialize(&mut self) -> Result<&[u8]> {
         // Object header
-        self.header.write_into(&mut self.block[..ObjectHeader::SIZE])?;
+        self.header
+            .write_into(&mut self.block[..ObjectHeader::SIZE])?;
 
         // btn fields
         let p = &mut self.block[ObjectHeader::SIZE..ObjectHeader::SIZE + 24];
@@ -599,7 +601,8 @@ impl BTreeNode {
         let is_fixed = self.fixed_kv();
         let toc_entry_size = if is_fixed { 4 } else { 8 };
         for (i, entry) in self.toc.iter().enumerate() {
-            let dst = &mut self.block[toc_off + i * toc_entry_size..toc_off + (i + 1) * toc_entry_size];
+            let dst =
+                &mut self.block[toc_off + i * toc_entry_size..toc_off + (i + 1) * toc_entry_size];
             if is_fixed {
                 dst[0..2].copy_from_slice(&entry.key_off.to_le_bytes());
                 dst[2..4].copy_from_slice(&entry.val_off.to_le_bytes());
@@ -685,13 +688,23 @@ where
     // If the root carries btree_info, it overrides the caller-provided sizes
     let (fks, fvs) = if let Some(info) = root.info {
         (
-            if info.key_size != 0 { info.key_size } else { fixed_key_size },
-            if info.val_size != 0 { info.val_size } else { fixed_val_size },
+            if info.key_size != 0 {
+                info.key_size
+            } else {
+                fixed_key_size
+            },
+            if info.val_size != 0 {
+                info.val_size
+            } else {
+                fixed_val_size
+            },
         )
     } else {
         (fixed_key_size, fixed_val_size)
     };
-    descend_lookup(reader, &root, root_paddr, block_size, fks, fvs, compare_fn, omap_root)
+    descend_lookup(
+        reader, &root, root_paddr, block_size, fks, fvs, compare_fn, omap_root,
+    )
 }
 
 fn descend_lookup<R: Read + Seek, F>(
@@ -736,7 +749,16 @@ where
     let child_paddr = resolve_oid(reader, child_oid, block_size, omap_root)?;
     let child_block = read_block(reader, child_paddr, block_size)?;
     let child = BTreeNode::parse(&child_block)?;
-    descend_lookup(reader, &child, child_paddr, block_size, fks, fvs, cmp, omap_root)
+    descend_lookup(
+        reader,
+        &child,
+        child_paddr,
+        block_size,
+        fks,
+        fvs,
+        cmp,
+        omap_root,
+    )
 }
 
 /// Scan leaves and collect every `(key, val)` where `range_fn` returns `Some(true)`
@@ -785,22 +807,22 @@ where
     let root = BTreeNode::parse(&root_block)?;
     let (fks, fvs) = if let Some(info) = root.info {
         (
-            if info.key_size != 0 { info.key_size } else { fixed_key_size },
-            if info.val_size != 0 { info.val_size } else { fixed_val_size },
+            if info.key_size != 0 {
+                info.key_size
+            } else {
+                fixed_key_size
+            },
+            if info.val_size != 0 {
+                info.val_size
+            } else {
+                fixed_val_size
+            },
         )
     } else {
         (fixed_key_size, fixed_val_size)
     };
     let _ = scan_node_paddr(
-        reader,
-        &root,
-        root_paddr,
-        block_size,
-        fks,
-        fvs,
-        range_fn,
-        omap_root,
-        &mut out,
+        reader, &root, root_paddr, block_size, fks, fvs, range_fn, omap_root, &mut out,
     )?;
     Ok(out)
 }
@@ -927,8 +949,10 @@ mod tests {
         }
         .write_into(&mut block[ObjectHeader::SIZE + 12..ObjectHeader::SIZE + 16]);
         // key_free_list / val_free_list = 0
-        Nloc { off: 0, len: 0 }.write_into(&mut block[ObjectHeader::SIZE + 16..ObjectHeader::SIZE + 20]);
-        Nloc { off: 0, len: 0 }.write_into(&mut block[ObjectHeader::SIZE + 20..ObjectHeader::SIZE + 24]);
+        Nloc { off: 0, len: 0 }
+            .write_into(&mut block[ObjectHeader::SIZE + 16..ObjectHeader::SIZE + 20]);
+        Nloc { off: 0, len: 0 }
+            .write_into(&mut block[ObjectHeader::SIZE + 20..ObjectHeader::SIZE + 24]);
 
         // Write TOC entries
         let toc_off = BTNODE_FIXED_PREFIX;
@@ -1024,11 +1048,7 @@ mod tests {
         let mut reader = IoCursor::new(block);
         let predicate = |k: &[u8]| {
             let v = u64::from_le_bytes(k.try_into().unwrap());
-            if v > 5 {
-                None
-            } else {
-                Some(v % 2 == 1)
-            }
+            if v > 5 { None } else { Some(v % 2 == 1) }
         };
         let matches = btree_scan(&mut reader, 0, 4096, 8, 8, &predicate, None).unwrap();
         assert_eq!(matches.len(), 3);

@@ -328,8 +328,8 @@ impl ApfsSuperblock {
         //   apfs_vol_uuid [16]
         //   apfs_last_mod_time u64
         //   apfs_fs_flags u64
-        //   apfs_formatted_by 32 bytes
-        //   apfs_modified_by 32*8 bytes
+        //   apfs_formatted_by apfs_modified_by_t (48 bytes)
+        //   apfs_modified_by apfs_modified_by_t[8] (48*8 bytes)
         //   apfs_volname [256]
         c.skip(4)?; // fs_index
         c.skip(8)?; // features
@@ -355,8 +355,8 @@ impl ApfsSuperblock {
         c.bytes_into(&mut vol_uuid)?;
         c.skip(8)?; // last_mod_time
         c.skip(8)?; // fs_flags
-        c.skip(32)?; // formatted_by
-        c.skip(32 * 8)?; // modified_by
+        c.skip(48)?; // formatted_by
+        c.skip(48 * 8)?; // modified_by
 
         let mut name_bytes = [0u8; 256];
         c.bytes_into(&mut name_bytes)?;
@@ -516,6 +516,67 @@ mod tests {
         }
         fletcher::refresh_object_checksum(&mut block).unwrap();
         block
+    }
+
+    fn build_minimal_apsb_block(volume_name: &str) -> Vec<u8> {
+        let mut block = vec![0u8; 4096];
+        let header = ObjectHeader {
+            checksum: [0; 8],
+            oid: 200,
+            xid: 5,
+            raw_type: OBJECT_TYPE_FS as u32,
+            subtype: 0,
+        };
+        header.write_into(&mut block[..32]).unwrap();
+
+        let mut w = Writer::new(&mut block, 32);
+        w.put_u32(APFS_MAGIC);
+        w.put_u32(0); // fs_index
+        w.put_u64(0); // features
+        w.put_u64(0); // ro_compat
+        w.put_u64(0); // incompat
+        w.put_u64(0); // unmount_time
+        w.put_u64(0); // reserve
+        w.put_u64(0); // quota
+        w.put_u64(0); // alloc
+        w.put_bytes(&[0u8; 20]); // meta_crypto_state
+        w.put_u32(0); // root_tree_type
+        w.put_u32(0); // extentref_tree_type
+        w.put_u32(0); // snap_meta_tree_type
+        w.put_u64(300); // omap_oid
+        w.put_u64(400); // root_tree_oid
+        w.put_u64(500); // extentref_tree_oid
+        w.put_u64(600); // snap_meta_tree_oid
+        w.put_u64(0); // revert_to_xid
+        w.put_u64(0); // revert_to_sblock_oid
+        w.put_u64(1024); // next_obj_id
+        w.put_u64(1); // num_files
+        w.put_u64(2); // num_directories
+        w.put_u64(3); // num_symlinks
+        w.put_u64(4); // num_other_fsobjects
+        w.put_u64(5); // num_snapshots
+        w.put_u64(0); // total_blocks_alloced
+        w.put_u64(0); // total_blocks_freed
+        w.put_bytes(&[0u8; 16]); // vol_uuid
+        w.put_u64(0); // last_mod_time
+        w.put_u64(0); // fs_flags
+        w.put_bytes(&[0u8; 48]); // formatted_by
+        w.put_bytes(&[0u8; 48 * 8]); // modified_by
+
+        let mut name = [0u8; 256];
+        let bytes = volume_name.as_bytes();
+        name[..bytes.len()].copy_from_slice(bytes);
+        w.put_bytes(&name);
+
+        fletcher::refresh_object_checksum(&mut block).unwrap();
+        block
+    }
+
+    #[test]
+    fn apsb_parses_volume_name_after_modified_by_history() {
+        let bytes = build_minimal_apsb_block("ApfsTest");
+        let parsed = ApfsSuperblock::parse(&bytes).unwrap();
+        assert_eq!(parsed.volume_name, "ApfsTest");
     }
 
     #[test]

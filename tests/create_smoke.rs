@@ -54,7 +54,9 @@ fn create_directory_then_file_inside_it() {
     }
     let mut vol = ApfsVolume::open(&cloned.file).expect("reopen ro");
     let walk = vol.walk().expect("walk");
-    let dir_ok = walk.iter().any(|e| e.path == "/newdir" && e.entry.kind == EntryKind::Directory);
+    let dir_ok = walk
+        .iter()
+        .any(|e| e.path == "/newdir" && e.entry.kind == EntryKind::Directory);
     let file_ok = walk
         .iter()
         .any(|e| e.path == "/newdir/inner.txt" && e.entry.kind == EntryKind::File);

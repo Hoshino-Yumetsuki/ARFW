@@ -5,7 +5,9 @@ fn main() {
 }
 
 #[cfg(windows)]
-fn main() -> anyhow::Result<()> { windows_main::main() }
+fn main() -> anyhow::Result<()> {
+    windows_main::main()
+}
 
 #[cfg(windows)]
 mod service;
@@ -17,6 +19,7 @@ fn run_daemon_internal(shutdown_rx: std::sync::mpsc::Receiver<()>) -> anyhow::Re
 
 #[cfg(windows)]
 mod windows_main {
+    use crate::service;
     use arfw::device_monitor::DeviceMonitor;
     use arfw::device_watcher::{DeviceEvent, DeviceWatcher};
     use arfw::disk::DiskReader;
@@ -25,12 +28,11 @@ mod windows_main {
     use clap::Parser;
     use std::collections::HashSet;
     use tracing::info;
-    use windows::core::PCWSTR;
     use windows::Win32::System::LibraryLoader::SetDllDirectoryW;
-    use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    use windows::core::PCWSTR;
     use winfsp::host::{FileSystemHost, VolumeParams};
-    use crate::service;
-    
+
     #[derive(Parser, Debug)]
     #[command(name = "arfw")]
     #[command(about = "APFS filesystem read only support for Windows", long_about = None)]
@@ -38,7 +40,7 @@ mod windows_main {
         #[command(subcommand)]
         command: Option<Command>,
     }
-    
+
     #[derive(Parser, Debug)]
     enum Command {
         /// Mount a specific device manually
@@ -46,19 +48,19 @@ mod windows_main {
             /// Physical drive path (e.g., \\.\PhysicalDrive1)
             #[arg(value_name = "DEVICE")]
             device: String,
-    
+
             /// Mount point (e.g., X:)
             #[arg(short = 'm', long = "mount", value_name = "MOUNTPOINT")]
             mount_point: String,
-    
+
             /// Volume index (default: 0)
             #[arg(short = 'v', long = "volume", default_value = "0")]
             volume_index: usize,
-    
+
             /// Enable debug logging
             #[arg(short = 'd', long = "debug")]
             debug: bool,
-    
+
             /// EXPERIMENTAL: open the volume read/write. Currently a no-op for
             /// I/O paths (write callbacks are not yet wired through WinFSP);
             /// reserved for the in-progress write support. Requires the env
@@ -80,11 +82,11 @@ mod windows_main {
         #[command(hide = true)]
         Service,
     }
-    
+
     fn setup_winfsp_dll_path() -> anyhow::Result<()> {
         let mut path = [0u16; 260];
         let mut size = (path.len() * std::mem::size_of::<u16>()) as u32;
-    
+
         // SAFETY: `path` is a fixed-size stack buffer [0u16; 260]. `size` is
         // initialised to the buffer's byte length so RegGetValueW will not write
         // beyond it. The type-erased `*mut _` cast is the standard pattern for
@@ -102,22 +104,22 @@ mod windows_main {
                 Some(path.as_mut_ptr() as *mut _),
                 Some(&mut size),
             );
-    
+
             if result.is_err() {
                 anyhow::bail!("Failed to read WinFsp registry key");
             }
-    
+
             let len = path.iter().position(|&c| c == 0).unwrap_or(path.len());
             let mut bin_path = String::from_utf16_lossy(&path[..len]);
             bin_path.push_str("\\bin");
-    
+
             let wide: Vec<u16> = bin_path.encode_utf16().chain(std::iter::once(0)).collect();
             SetDllDirectoryW(PCWSTR(wide.as_ptr()))?;
         }
-    
+
         Ok(())
     }
-    
+
     fn run_manual_mount(
         device: String,
         mount_point: String,
@@ -127,14 +129,14 @@ mod windows_main {
     ) -> anyhow::Result<()> {
         let level = if debug { "debug" } else { "info" };
         tracing_subscriber::fmt().with_env_filter(level).init();
-    
+
         info!("ARFW v{}", env!("CARGO_PKG_VERSION"));
         info!("Opening device: {}", device);
-    
+
         let partition_offset = 1048576;
         let disk = DiskReader::open_with_offset(&device, partition_offset)?;
         info!("Disk opened successfully with offset {}", partition_offset);
-    
+
         let mode = if rw_unsafe {
             tracing::warn!(
                 "--rw-unsafe specified: opening volume in EXPERIMENTAL read/write mode. \
@@ -148,7 +150,7 @@ mod windows_main {
         };
         let driver = ApfsDriver::with_mode(disk, mode)?;
         info!("APFS volume loaded");
-    
+
         let mut volume_params = VolumeParams::new();
         volume_params
             .prefix("")
@@ -160,64 +162,64 @@ mod windows_main {
             .sector_size(512)
             .sectors_per_allocation_unit(1)
             .volume_serial_number(0x12345678);
-    
+
         let mut host = FileSystemHost::new(volume_params, driver)?;
         info!("FileSystemHost created");
-    
+
         let mount_point = if mount_point.len() == 2 && mount_point.ends_with(':') {
             format!(r"\\.\{}", mount_point)
         } else {
             mount_point.clone()
         };
-    
+
         host.mount(&mount_point)?;
         info!("Mounted at {} (global drive)", mount_point);
-    
+
         host.start()?;
         info!("Dispatcher started. Filesystem is now accessible.");
         info!("Press Ctrl+C to unmount and exit.");
-    
+
         let (tx, rx) = std::sync::mpsc::channel();
         ctrlc::set_handler(move || {
             tx.send(()).expect("Could not send signal");
         })?;
-    
+
         rx.recv()?;
         info!("Unmounting...");
-    
+
         drop(host);
         info!("Unmounted successfully");
-    
+
         Ok(())
     }
-    
+
     fn run_daemon(debug: bool) -> anyhow::Result<()> {
         let level = if debug { "debug" } else { "info" };
         tracing_subscriber::fmt().with_env_filter(level).init();
-    
+
         let (signal_tx, signal_rx) = std::sync::mpsc::channel();
-    
+
         ctrlc::set_handler(move || {
             let _ = signal_tx.send(());
         })?;
-    
+
         run_daemon_internal(signal_rx)
     }
-    
+
     pub fn run_daemon_internal(shutdown_rx: std::sync::mpsc::Receiver<()>) -> anyhow::Result<()> {
         info!("ARFW Daemon v{}", env!("CARGO_PKG_VERSION"));
         info!("Starting APFS daemon...");
-    
+
         let manager = MountManager::new();
         let mut known_partitions = HashSet::new();
-    
+
         let (device_tx, device_rx) = crossbeam_channel::unbounded();
-    
+
         let _watcher = DeviceWatcher::new(device_tx)?;
         info!("Device watcher active. Waiting for disk events...");
-    
+
         scan_and_update(&manager, &mut known_partitions);
-    
+
         loop {
             crossbeam_channel::select! {
                 recv(device_rx) -> event => {
@@ -241,10 +243,10 @@ mod windows_main {
                 }
             }
         }
-    
+
         Ok(())
     }
-    
+
     fn scan_and_update(manager: &MountManager, known_partitions: &mut HashSet<(u32, u32)>) {
         match DeviceMonitor::scan_apfs_partitions() {
             Ok(partitions) => {
@@ -252,7 +254,7 @@ mod windows_main {
                     .iter()
                     .map(|p| (p.disk_number, p.partition_number))
                     .collect();
-    
+
                 // Mount new partitions
                 for partition in &partitions {
                     let key = (partition.disk_number, partition.partition_number);
@@ -271,7 +273,7 @@ mod windows_main {
                         }
                     }
                 }
-    
+
                 // Unmount removed partitions
                 let removed: Vec<_> = known_partitions
                     .difference(&current_partitions)
@@ -287,12 +289,12 @@ mod windows_main {
             }
         }
     }
-    
+
     pub fn main() -> anyhow::Result<()> {
         setup_winfsp_dll_path()?;
-    
+
         let args = Args::parse();
-    
+
         // For the Service command, WinFsp initialization is handled inside run_service()
         // with a retry loop; WinFsp may not be available yet at service startup time
         // For all other commands, initialize immediately and die on failure
@@ -300,7 +302,7 @@ mod windows_main {
             Some(Command::Service) => None,
             _ => Some(winfsp::winfsp_init_or_die()),
         };
-    
+
         match args.command {
             Some(Command::Mount {
                 device,

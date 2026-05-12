@@ -32,7 +32,10 @@ fn clone_fixture_inner(src: &Path) -> io::Result<ClonedFixture> {
     let dir = tempfile::tempdir()?;
     let dst = dir.path().join("apfs_clone.raw");
     fs::copy(src, &dst)?;
-    let file = std::fs::OpenOptions::new().read(true).write(true).open(&dst)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&dst)?;
     Ok(ClonedFixture {
         _dir: dir,
         path: dst,

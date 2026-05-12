@@ -1,6 +1,7 @@
 //! Integration test for the spaceman parser + bitmap allocator
 mod common;
 
+use arfw::apfs::ApfsVolume;
 use arfw::apfs::checkpoint::resolve_ephemeral;
 use arfw::apfs::spaceman::SpaceManager;
 use arfw::apfs::superblock::{find_latest_nxsb, read_nxsb};
@@ -32,6 +33,25 @@ fn spaceman_opens_and_reports_free_blocks() {
     assert!(sm.spaceman.main_block_count() > 0);
     assert!(sm.spaceman.main_free_count() > 0);
     assert!(sm.spaceman.main_free_count() < sm.spaceman.main_block_count());
+}
+
+#[test]
+fn volume_info_reports_container_space_from_spaceman() {
+    let reader = match common::open_fixture() {
+        Some(r) => r,
+        None => {
+            common::skip_no_fixture("volume_info_reports_container_space_from_spaceman");
+            return;
+        }
+    };
+
+    let volume = ApfsVolume::open(reader).expect("open APFS volume");
+    let info = volume.volume_info();
+
+    assert!(info.total_bytes > 0);
+    assert!(info.free_bytes > 0);
+    assert!(info.free_bytes < info.total_bytes);
+    assert_eq!(info.used_bytes, info.total_bytes - info.free_bytes);
 }
 
 #[test]

@@ -116,7 +116,6 @@ pub fn resolve_ephemeral<R: Read + Seek>(
         }
     }
 
-    best.map(|(_, p)| p).ok_or_else(|| {
-        ApfsError::NotFound(format!("ephemeral oid {oid:#x}"))
-    })
+    best.map(|(_, p)| p)
+        .ok_or_else(|| ApfsError::NotFound(format!("ephemeral oid {oid:#x}")))
 }

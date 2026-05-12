@@ -133,9 +133,9 @@ impl Transaction {
         rw: &mut RW,
     ) -> Result<()> {
         for (paddr, block) in dirty.iter() {
-            let offset = paddr.checked_mul(block_size).ok_or_else(|| {
-                ApfsError::Internal(format!("paddr {paddr} overflows offset"))
-            })?;
+            let offset = paddr
+                .checked_mul(block_size)
+                .ok_or_else(|| ApfsError::Internal(format!("paddr {paddr} overflows offset")))?;
             let mut tmp = block.clone();
             refresh_object_checksum(&mut tmp)?;
             rw.seek(SeekFrom::Start(offset))?;

@@ -61,6 +61,9 @@ pub struct WalkEntry {
 pub struct VolumeInfo {
     pub name: String,
     pub block_size: u32,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub used_bytes: u64,
     pub num_files: u64,
     pub num_directories: u64,
     pub num_symlinks: u64,
@@ -118,24 +121,25 @@ impl<R: Read + Seek> ApfsVolume<R> {
             vol_sb.root_tree_oid,
         )?;
 
-        let info = VolumeInfo {
-            name: vol_sb.volume_name.clone(),
-            block_size,
-            num_files: vol_sb.num_files,
-            num_directories: vol_sb.num_directories,
-            num_symlinks: vol_sb.num_symlinks,
-        };
-
         // APFS_INCOMPAT_CASE_INSENSITIVE bit (0x8): when SET the volume is
         // case-insensitive. Conservative default: assume case-insensitive
         // when in doubt
         let case_insensitive = (vol_sb.incompat_features & 0x8) != 0;
-        let spaceman_paddr = checkpoint::resolve_ephemeral(
-            &mut reader,
-            &nxsb,
-            nxsb.spaceman_oid,
-        )
-        .unwrap_or(0);
+        let spaceman_paddr = checkpoint::resolve_ephemeral(&mut reader, &nxsb, nxsb.spaceman_oid)?;
+        let spaceman = spaceman::Spaceman::read(&mut reader, spaceman_paddr, block_size)?;
+        let total_bytes = nxsb.block_count * block_size as u64;
+        let free_bytes = spaceman.main_free_count() * block_size as u64;
+
+        let info = VolumeInfo {
+            name: vol_sb.volume_name.clone(),
+            block_size,
+            total_bytes,
+            free_bytes,
+            used_bytes: total_bytes - free_bytes,
+            num_files: vol_sb.num_files,
+            num_directories: vol_sb.num_directories,
+            num_symlinks: vol_sb.num_symlinks,
+        };
 
         Ok(Self {
             reader,
@@ -446,8 +450,7 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
 
         let mut tx = transaction::Transaction::new(self.block_size as u64);
         tx.stage(leaf_paddr, new_block)?;
-        let (_n, new_nxsb_paddr) =
-            tx.commit_with_nxsb_rotation(&mut self.reader, &self.nxsb)?;
+        let (_n, new_nxsb_paddr) = tx.commit_with_nxsb_rotation(&mut self.reader, &self.nxsb)?;
 
         let nxsb_bytes = object::read_block(&mut self.reader, new_nxsb_paddr, self.block_size)?;
         self.nxsb = superblock::NxSuperblock::parse(&nxsb_bytes)?;
@@ -509,8 +512,7 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
 
         let mut tx = transaction::Transaction::new(self.block_size as u64);
         tx.stage(leaf_paddr, new_block)?;
-        let (_n, new_nxsb_paddr) =
-            tx.commit_with_nxsb_rotation(&mut self.reader, &self.nxsb)?;
+        let (_n, new_nxsb_paddr) = tx.commit_with_nxsb_rotation(&mut self.reader, &self.nxsb)?;
 
         let nxsb_bytes = object::read_block(&mut self.reader, new_nxsb_paddr, self.block_size)?;
         self.nxsb = superblock::NxSuperblock::parse(&nxsb_bytes)?;
@@ -678,8 +680,7 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
             let bytes = node.serialize()?.to_vec();
             tx.stage(paddr, bytes)?;
         }
-        let (_n, new_nxsb_paddr) =
-            tx.commit_with_nxsb_rotation(&mut self.reader, &self.nxsb)?;
+        let (_n, new_nxsb_paddr) = tx.commit_with_nxsb_rotation(&mut self.reader, &self.nxsb)?;
         let nxsb_bytes = object::read_block(&mut self.reader, new_nxsb_paddr, self.block_size)?;
         self.nxsb = superblock::NxSuperblock::parse(&nxsb_bytes)?;
         Ok(())
@@ -733,14 +734,15 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
             &cmp,
             Some(self.vol_omap_root_block),
         )?
-        .ok_or_else(|| ApfsError::NotFound(format!(
-            "record (oid={oid}, type={j_type}) not found"
-        )))?;
+        .ok_or_else(|| {
+            ApfsError::NotFound(format!("record (oid={oid}, type={j_type}) not found"))
+        })?;
         let node = self.load_or_get_leaf(cache, leaf_paddr)?;
-        let idx = catalog::find_record_in_node(node, oid, j_type, drec_name)?
-            .ok_or_else(|| ApfsError::NotFound(format!(
+        let idx = catalog::find_record_in_node(node, oid, j_type, drec_name)?.ok_or_else(|| {
+            ApfsError::NotFound(format!(
                 "record (oid={oid}, type={j_type}) not in expected leaf"
-            )))?;
+            ))
+        })?;
         node.delete_leaf_var(idx)?;
         Ok(())
     }
@@ -755,11 +757,8 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
                 "spaceman_paddr unknown; cannot allocate".into(),
             ));
         }
-        let sm = spaceman::SpaceManager::open(
-            &mut self.reader,
-            self.spaceman_paddr,
-            self.block_size,
-        )?;
+        let sm =
+            spaceman::SpaceManager::open(&mut self.reader, self.spaceman_paddr, self.block_size)?;
         self.spaceman = Some(sm);
         Ok(())
     }
@@ -770,10 +769,7 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
     /// only on disposable / I_UNDERSTAND_DATA_LOSS images
     fn alloc_blocks(&mut self, count: u64) -> Result<Vec<(u64, u64)>> {
         self.ensure_spaceman()?;
-        self.spaceman
-            .as_mut()
-            .unwrap()
-            .alloc_blocks(count)
+        self.spaceman.as_mut().unwrap().alloc_blocks(count)
     }
 
     /// Allocate a fresh OID for a new file or directory. Pulled from the
@@ -802,8 +798,7 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
             let bytes = node.serialize()?.to_vec();
             tx.stage(paddr, bytes)?;
         }
-        let (_n, new_nxsb_paddr) =
-            tx.commit_with_nxsb_rotation(&mut self.reader, &self.nxsb)?;
+        let (_n, new_nxsb_paddr) = tx.commit_with_nxsb_rotation(&mut self.reader, &self.nxsb)?;
         let nxsb_bytes = object::read_block(&mut self.reader, new_nxsb_paddr, self.block_size)?;
         self.nxsb = superblock::NxSuperblock::parse(&nxsb_bytes)?;
         Ok(())
@@ -831,9 +826,11 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
             &cmp,
             Some(self.vol_omap_root_block),
         )?
-        .ok_or_else(|| ApfsError::NotFound(format!(
-            "catalog record (oid={oid}, type={j_type}) not found"
-        )))?;
+        .ok_or_else(|| {
+            ApfsError::NotFound(format!(
+                "catalog record (oid={oid}, type={j_type}) not found"
+            ))
+        })?;
         Ok(leaf_paddr)
     }
 
@@ -900,7 +897,11 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
         }
         // Reject if the entry already exists under any name match
         if self
-            .stat(&format!("{}/{}", parent_lookup.trim_end_matches('/'), basename))
+            .stat(&format!(
+                "{}/{}",
+                parent_lookup.trim_end_matches('/'),
+                basename
+            ))
             .is_ok()
         {
             return Err(ApfsError::Internal(format!(
@@ -944,8 +945,7 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
 
         let inode_leaf = self.locate_leaf_for_key(&inode_key)?;
         let drec_leaf = self.locate_leaf_for_key(&drec_key)?;
-        let parent_inode_leaf =
-            self.locate_record_leaf(parent_oid, catalog::J_TYPE_INODE)?;
+        let parent_inode_leaf = self.locate_record_leaf(parent_oid, catalog::J_TYPE_INODE)?;
 
         let mut touched: std::collections::BTreeMap<u64, btree::BTreeNode> =
             std::collections::BTreeMap::new();
@@ -1001,7 +1001,11 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
             return Err(ApfsError::NotADirectory(parent_lookup));
         }
         if self
-            .stat(&format!("{}/{}", parent_lookup.trim_end_matches('/'), basename))
+            .stat(&format!(
+                "{}/{}",
+                parent_lookup.trim_end_matches('/'),
+                basename
+            ))
             .is_ok()
         {
             return Err(ApfsError::Internal(format!(
@@ -1044,8 +1048,7 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
 
         let inode_leaf = self.locate_leaf_for_key(&inode_key)?;
         let drec_leaf = self.locate_leaf_for_key(&drec_key)?;
-        let parent_inode_leaf =
-            self.locate_record_leaf(parent_oid, catalog::J_TYPE_INODE)?;
+        let parent_inode_leaf = self.locate_record_leaf(parent_oid, catalog::J_TYPE_INODE)?;
 
         let mut touched: std::collections::BTreeMap<u64, btree::BTreeNode> =
             std::collections::BTreeMap::new();
@@ -1118,8 +1121,7 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
                     };
                     match k_oid.cmp(&parent_oid) {
                         std::cmp::Ordering::Less => Some(false),
-                        std::cmp::Ordering::Equal => match k_type.cmp(&catalog::J_TYPE_DIR_REC)
-                        {
+                        std::cmp::Ordering::Equal => match k_type.cmp(&catalog::J_TYPE_DIR_REC) {
                             std::cmp::Ordering::Less => Some(false),
                             std::cmp::Ordering::Equal => Some(true),
                             std::cmp::Ordering::Greater => None,
@@ -1293,15 +1295,7 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
         };
         {
             let n = self.load_or_get_leaf(&mut touched, to_drec_leaf)?;
-            catalog::insert_drec_record(
-                n,
-                to_parent_oid,
-                to_base,
-                to_hash,
-                oid,
-                now,
-                file_type,
-            )?;
+            catalog::insert_drec_record(n, to_parent_oid, to_base, to_hash, oid, now, file_type)?;
         }
 
         // 3. Cross-parent rename: update both parents' nchildren and the
@@ -1492,13 +1486,7 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
             };
             let leaf = self.locate_leaf_for_key(&key)?;
             let n = self.load_or_get_leaf(&mut touched, leaf)?;
-            catalog::insert_file_extent_record(
-                n,
-                oid,
-                log_addr,
-                length_bytes,
-                *start_paddr,
-            )?;
+            catalog::insert_file_extent_record(n, oid, log_addr, length_bytes, *start_paddr)?;
             log_addr += length_bytes;
         }
 
@@ -1509,9 +1497,7 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
         // Try in-place splice first (works when dstream xfield exists)
         let needs_install = {
             let n = self.load_or_get_leaf(&mut touched, inode_leaf)?;
-            match catalog::set_inode_dstream_size_and_alloc_in_node(
-                n, oid, new_size, new_alloced,
-            ) {
+            match catalog::set_inode_dstream_size_and_alloc_in_node(n, oid, new_size, new_alloced) {
                 Ok(_) => false,
                 Err(ApfsError::BadCatalog(_)) => true,
                 Err(e) => return Err(e),
@@ -1545,7 +1531,9 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
         //    Existing files created by macOS on the fixture have one; for
         //    files we created (via create_file) the first append/grow needs
         //    to install it
-        let has_dstream_id = self.locate_record_leaf(oid, catalog::J_TYPE_DSTREAM_ID).is_ok();
+        let has_dstream_id = self
+            .locate_record_leaf(oid, catalog::J_TYPE_DSTREAM_ID)
+            .is_ok();
         if !has_dstream_id {
             let key = {
                 let mut k = Vec::with_capacity(8);
@@ -1646,8 +1634,10 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
         let total = buf.len() as u64;
         while written < total {
             let logical = offset + written;
-            let Some((log_start, phys_start, length)) =
-                map.iter().find(|(s, _, l)| logical >= *s && logical < *s + *l).copied()
+            let Some((log_start, phys_start, length)) = map
+                .iter()
+                .find(|(s, _, l)| logical >= *s && logical < *s + *l)
+                .copied()
             else {
                 // Sparse hole: stop here and return what we've written
                 return Ok(written);
@@ -1656,7 +1646,10 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
             let avail_in_extent = length - intra;
             let chunk = avail_in_extent.min(total - written);
             let phys_offset = phys_start + intra;
-            self.write_raw_at(phys_offset, &buf[written as usize..(written + chunk) as usize])?;
+            self.write_raw_at(
+                phys_offset,
+                &buf[written as usize..(written + chunk) as usize],
+            )?;
             written += chunk;
         }
         Ok(written)
@@ -1676,13 +1669,11 @@ impl<R: Read + Write + Seek> ApfsVolume<R> {
 
             // RMW: read whole block, splice, seek back, write block
             let mut block = vec![0u8; bs as usize];
-            self.reader
-                .seek(std::io::SeekFrom::Start(block_num * bs))?;
+            self.reader.seek(std::io::SeekFrom::Start(block_num * bs))?;
             self.reader.read_exact(&mut block)?;
             block[intra..intra + chunk]
                 .copy_from_slice(&data[written as usize..written as usize + chunk]);
-            self.reader
-                .seek(std::io::SeekFrom::Start(block_num * bs))?;
+            self.reader.seek(std::io::SeekFrom::Start(block_num * bs))?;
             self.reader.write_all(&block)?;
             written += chunk as u64;
         }

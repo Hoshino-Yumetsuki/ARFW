@@ -1,6 +1,6 @@
+use crate::apfs::{ApfsVolume, EntryKind, FileStat};
 use crate::disk::DiskReader;
 use crate::error::{Error, Result};
-use crate::apfs::{ApfsVolume, EntryKind, FileStat};
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
@@ -52,7 +52,6 @@ pub struct ApfsDriver {
     raw_disk: Arc<Mutex<DiskReader>>,
     /// Partition offset in bytes, added to extent physical addresses before reading
     partition_offset: u64,
-    disk_size: u64,
     /// LRU cache: path -> CachedStat
     stat_cache: Mutex<LruCache<String, CachedStat>>,
     /// Read or read/write. Currently only `ReadOnly` is honoured by the
@@ -88,11 +87,6 @@ impl ApfsDriver {
         let partition_offset = disk.partition_offset();
         let raw_disk = disk.reopen_raw()?;
 
-        let mut meta_disk = disk.reopen()?;
-        let disk_size = meta_disk
-            .read_apfs_container_size()
-            .unwrap_or_else(|_| disk.size());
-
         // The metadata-side handle drives the write path through ApfsVolume
         // In RW mode we must reopen with FILE_GENERIC_WRITE access; in RO mode
         // we keep the original read-only handle to surface a clear error if
@@ -105,14 +99,12 @@ impl ApfsDriver {
             disk
         };
 
-        let volume =
-            ApfsVolume::open(metadata_disk).map_err(|e| Error::Apfs(e.to_string()))?;
+        let volume = ApfsVolume::open(metadata_disk).map_err(|e| Error::Apfs(e.to_string()))?;
 
         Ok(Self {
             volume: Arc::new(Mutex::new(volume)),
             raw_disk: Arc::new(Mutex::new(raw_disk)),
             partition_offset,
-            disk_size,
             stat_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(STAT_CACHE_CAPACITY).unwrap(),
             )),
@@ -490,8 +482,8 @@ impl FileSystemContext for ApfsDriver {
         let vol = self.volume.lock().unwrap();
         let info = vol.volume_info();
 
-        out_volume_info.total_size = self.disk_size;
-        out_volume_info.free_size = 0;
+        out_volume_info.total_size = info.total_bytes;
+        out_volume_info.free_size = info.free_bytes;
         out_volume_info.set_volume_label(&info.name);
 
         Ok(())

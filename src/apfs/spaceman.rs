@@ -348,7 +348,9 @@ impl SpaceManager {
             return Ok(Vec::new());
         }
         if count > self.spaceman.dev[SD_MAIN].free_count {
-            return Err(ApfsError::Internal("alloc_blocks: not enough free blocks".into()));
+            return Err(ApfsError::Internal(
+                "alloc_blocks: not enough free blocks".into(),
+            ));
         }
 
         // Fast path: try a single contiguous run inside one chunk
@@ -528,7 +530,13 @@ impl SpaceManager {
         self.dirty
             .iter()
             .enumerate()
-            .filter_map(|(i, &d)| if d { Some((i, self.bitmaps[i].as_slice())) } else { None })
+            .filter_map(|(i, &d)| {
+                if d {
+                    Some((i, self.bitmaps[i].as_slice()))
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
@@ -694,9 +702,33 @@ mod tests {
             fs_reserve_block_count: 0,
             fs_reserve_alloc_count: 0,
             fq: [
-                SpacemanFreeQueue { count: 0, tree_oid: 0, oldest_xid: 0, tree_node_limit: 0, _pad16: 0, _pad32: 0, _reserved: 0 },
-                SpacemanFreeQueue { count: 0, tree_oid: 0, oldest_xid: 0, tree_node_limit: 0, _pad16: 0, _pad32: 0, _reserved: 0 },
-                SpacemanFreeQueue { count: 0, tree_oid: 0, oldest_xid: 0, tree_node_limit: 0, _pad16: 0, _pad32: 0, _reserved: 0 },
+                SpacemanFreeQueue {
+                    count: 0,
+                    tree_oid: 0,
+                    oldest_xid: 0,
+                    tree_node_limit: 0,
+                    _pad16: 0,
+                    _pad32: 0,
+                    _reserved: 0,
+                },
+                SpacemanFreeQueue {
+                    count: 0,
+                    tree_oid: 0,
+                    oldest_xid: 0,
+                    tree_node_limit: 0,
+                    _pad16: 0,
+                    _pad32: 0,
+                    _reserved: 0,
+                },
+                SpacemanFreeQueue {
+                    count: 0,
+                    tree_oid: 0,
+                    oldest_xid: 0,
+                    tree_node_limit: 0,
+                    _pad16: 0,
+                    _pad32: 0,
+                    _reserved: 0,
+                },
             ],
             main_cib_addrs: vec![1000],
             raw_block: vec![0u8; 4096],
@@ -724,7 +756,13 @@ mod tests {
         let bytes_per_chunk = (blocks_per_chunk as usize).div_ceil(8);
         let bitmaps = vec![vec![0u8; bytes_per_chunk]; chunks];
         let dirty = vec![false; chunks];
-        SpaceManager { spaceman: sm, cibs, bitmaps, dirty, block_size: 4096 }
+        SpaceManager {
+            spaceman: sm,
+            cibs,
+            bitmaps,
+            dirty,
+            block_size: 4096,
+        }
     }
 
     #[test]
@@ -763,7 +801,12 @@ mod tests {
         let runs = sm.alloc_blocks(3).unwrap();
         let total: u64 = runs.iter().map(|&(_, l)| l).sum();
         assert_eq!(total, 3);
-        assert_eq!(runs.len(), 3, "expected fragmented allocation, got {:?}", runs);
+        assert_eq!(
+            runs.len(),
+            3,
+            "expected fragmented allocation, got {:?}",
+            runs
+        );
         assert_eq!(sm.spaceman.dev[SD_MAIN].free_count, 0);
     }
 
