@@ -8,6 +8,14 @@ fn main() {
 fn main() -> anyhow::Result<()> { windows_main::main() }
 
 #[cfg(windows)]
+mod service;
+
+#[cfg(windows)]
+fn run_daemon_internal(shutdown_rx: std::sync::mpsc::Receiver<()>) -> anyhow::Result<()> {
+    windows_main::run_daemon_internal(shutdown_rx)
+}
+
+#[cfg(windows)]
 mod windows_main {
     use arfw::device_monitor::DeviceMonitor;
     use arfw::device_watcher::{DeviceEvent, DeviceWatcher};
@@ -21,9 +29,7 @@ mod windows_main {
     use windows::Win32::System::LibraryLoader::SetDllDirectoryW;
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
     use winfsp::host::{FileSystemHost, VolumeParams};
-    
-    #[path = "service.rs"]
-    mod service;
+    use crate::service;
     
     #[derive(Parser, Debug)]
     #[command(name = "arfw")]
