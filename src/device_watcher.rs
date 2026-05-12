@@ -26,9 +26,9 @@ pub enum DeviceEvent {
 
 pub struct DeviceWatcher {
     handle: HCMNOTIFICATION,
-    /// Owning pointer to the Sender passed as context to the OS callback.
+    /// Owning pointer to the Sender passed as context to the OS callback
     /// Must be freed after CM_Unregister_Notification returns (which guarantees
-    /// no in-flight callbacks remain that could still dereference this pointer).
+    /// no in-flight callbacks remain that could still dereference this pointer)
     sender_ptr: *mut Sender<DeviceEvent>,
 }
 
@@ -56,7 +56,7 @@ impl DeviceWatcher {
         // freed in Drop after CM_Unregister_Notification returns, which
         // guarantees all in-flight callbacks have completed before the pointer
         // is released. The callback validates the pointer is non-null before
-        // dereferencing it.
+        // dereferencing it
         let result = unsafe {
             CM_Register_Notification(
                 &filter,
@@ -67,9 +67,9 @@ impl DeviceWatcher {
         };
 
         if result != CR_SUCCESS {
-            // Registration failed — reclaim the Box to avoid a leak.
+            // Registration failed — reclaim the Box to avoid a leak
             // SAFETY: `sender_ptr` was created by Box::into_raw above and has
-            // not been passed to any OS callback yet (registration failed).
+            // not been passed to any OS callback yet (registration failed)
             unsafe { drop(Box::from_raw(sender_ptr)) };
             anyhow::bail!("Failed to register device notification: {:?}", result);
         }
@@ -78,12 +78,12 @@ impl DeviceWatcher {
         Ok(Self { handle, sender_ptr })
     }
 
-    // SAFETY: This function is called by the Windows CM notification subsystem.
+    // SAFETY: This function is called by the Windows CM notification subsystem
     // `context` is the `sender_ptr` passed to CM_Register_Notification — a
     // valid `*mut Sender<DeviceEvent>` heap-allocated in `new()`. The OS
     // guarantees this callback is not invoked after CM_Unregister_Notification
-    // returns, so the pointer is always valid when this function runs.
-    // We only take a shared reference (`&*`) and never move or free the value.
+    // returns, so the pointer is always valid when this function runs
+    // We only take a shared reference (`&*`) and never move or free the value
     unsafe extern "system" fn callback(
         _notify: HCMNOTIFICATION,
         context: *const c_void,
@@ -96,7 +96,7 @@ impl DeviceWatcher {
         }
 
         // SAFETY: `context` is a valid `*const Sender<DeviceEvent>` for the
-        // lifetime of this callback (see function-level SAFETY comment above).
+        // lifetime of this callback (see function-level SAFETY comment above)
         let sender = unsafe { &*(context as *const Sender<DeviceEvent>) };
 
         let event = match action {
@@ -117,16 +117,16 @@ impl Drop for DeviceWatcher {
     fn drop(&mut self) {
         // SAFETY: CM_Unregister_Notification blocks until all in-flight
         // callbacks have completed before returning. After this call returns,
-        // no callback can dereference `sender_ptr`, so it is safe to free it.
+        // no callback can dereference `sender_ptr`, so it is safe to free it
         unsafe {
             let _ = CM_Unregister_Notification(self.handle);
         }
         info!("Device watcher unregistered");
 
-        // Reclaim the Box to free the Sender memory.
+        // Reclaim the Box to free the Sender memory
         // SAFETY: `sender_ptr` was created by Box::into_raw in `new()` and has
         // not been freed yet. CM_Unregister_Notification above guarantees no
-        // callback is running or will run after this point.
+        // callback is running or will run after this point
         unsafe {
             drop(Box::from_raw(self.sender_ptr));
         }

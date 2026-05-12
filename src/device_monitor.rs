@@ -8,8 +8,8 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::Ioctl::IOCTL_DISK_GET_DRIVE_LAYOUT_EX;
 use windows::Win32::System::IO::DeviceIoControl;
 
-/// RAII wrapper for a Windows HANDLE that calls CloseHandle on drop.
-/// Guarantees the handle is closed on both success and error paths.
+/// RAII wrapper for a Windows HANDLE that calls CloseHandle on drop
+/// Guarantees the handle is closed on both success and error paths
 struct OwnedHandle(HANDLE);
 
 impl OwnedHandle {
@@ -20,8 +20,8 @@ impl OwnedHandle {
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
-        // SAFETY: `self.0` is a valid open HANDLE created by CreateFileA.
-        // CloseHandle is called exactly once here in Drop.
+        // SAFETY: `self.0` is a valid open HANDLE created by CreateFileA
+        // CloseHandle is called exactly once here in Drop
         unsafe {
             let _ = CloseHandle(self.0);
         }
@@ -62,7 +62,7 @@ impl DeviceMonitor {
     }
 
     fn scan_disk_for_apfs(disk_path: &str, disk_num: u32) -> Result<Vec<ApfsPartition>> {
-        // OwnedHandle ensures CloseHandle is called on both success and error paths.
+        // OwnedHandle ensures CloseHandle is called on both success and error paths
         let handle = Self::open_disk(disk_path)?;
         Self::read_gpt_partitions(handle.as_raw(), disk_num)
     }
@@ -72,7 +72,7 @@ impl DeviceMonitor {
 
         // SAFETY: `path_cstr` is a null-terminated byte string that outlives
         // this synchronous CreateFileA call. CreateFileA does not retain the
-        // pointer after returning.
+        // pointer after returning
         let handle = unsafe {
             CreateFileA(
                 PCSTR(path_cstr.as_ptr()),
@@ -119,14 +119,14 @@ impl DeviceMonitor {
         // SAFETY: DRIVE_LAYOUT_INFORMATION_EX and PARTITION_INFORMATION_EX
         // contain only integer/array fields; all-zeros is a valid bit pattern
         // and the struct is immediately overwritten by DeviceIoControl before
-        // any field is read.
+        // any field is read
         let mut layout: DRIVE_LAYOUT_INFORMATION_EX = unsafe { std::mem::zeroed() };
         let mut bytes_returned = 0u32;
 
         // SAFETY: `handle` is a valid open disk handle. `layout` lives for the
         // duration of this call and its size matches the output buffer length
         // we advertise to the kernel. The type-erased `*mut _` cast is the
-        // standard pattern for DeviceIoControl output buffers.
+        // standard pattern for DeviceIoControl output buffers
         unsafe {
             let result = DeviceIoControl(
                 handle,
@@ -148,7 +148,7 @@ impl DeviceMonitor {
 
         // Cap iteration at the array capacity (128) to prevent out-of-bounds
         // access if the OS reports a partition_count larger than our fixed-size
-        // partition_entry array.
+        // partition_entry array
         let count = (layout.partition_count as usize).min(128);
         for i in 0..count {
             let partition = &layout.partition_entry[i];
@@ -180,7 +180,7 @@ impl DeviceMonitor {
 
             // SAFETY: `path_wide` is a null-terminated UTF-16 Vec<u16> that
             // outlives this synchronous GetDriveTypeW call. The function does
-            // not retain the pointer after returning.
+            // not retain the pointer after returning
             unsafe {
                 use windows::Win32::Storage::FileSystem::GetDriveTypeW;
                 let drive_type = GetDriveTypeW(windows::core::PCWSTR(path_wide.as_ptr()));
